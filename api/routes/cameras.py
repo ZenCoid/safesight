@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
 from models.camera import Camera
-from schemas.camera import CameraCreate, CameraRead  # We'll define these
+from schemas.camera import CameraCreate, CameraRead
 from core.database import AsyncSessionLocal
 
 router = APIRouter()
@@ -20,7 +20,7 @@ async def list_cameras(db: AsyncSession = Depends(get_db)):
 
 @router.post("/", response_model=CameraRead, status_code=201)
 async def create_camera(cam: CameraCreate, db: AsyncSession = Depends(get_db)):
-    db_cam = Camera(**cam.dict())
+    db_cam = Camera(**cam.model_dump())
     db.add(db_cam)
     await db.commit()
     await db.refresh(db_cam)
