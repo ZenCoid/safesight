@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
+from uuid import UUID
 from models.camera import Camera
 from schemas.camera import CameraCreate, CameraRead
 from core.database import AsyncSessionLocal

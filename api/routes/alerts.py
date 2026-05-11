@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
+from uuid import UUID
 from models.alert import Alert
 from models.violation import ViolationEvent
 from schemas.alert import AlertRead
@@ -25,14 +26,12 @@ async def acknowledge_alert(alert_id: UUID, db: AsyncSession = Depends(get_db)):
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # Mark the violation event itself as acknowledged (not the alert.sent flag)
     viol = await db.get(ViolationEvent, alert.violation_event_id)
     if viol:
         viol.acknowledged = True
         await db.commit()
         await db.refresh(viol)
 
-    # Also update the alert status for UI consistency
     alert.sent = True
     await db.commit()
     await db.refresh(alert)
