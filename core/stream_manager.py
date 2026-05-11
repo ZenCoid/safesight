@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict
+from typing import Dict, Optional
 from uuid import UUID
 from sqlalchemy import select
 from core.database import AsyncSessionLocal
@@ -14,7 +14,6 @@ class StreamManager:
         self.readers: Dict[UUID, RTSPReader] = {}
 
     async def start_all_from_db(self):
-        """Fetch all enabled cameras from DB and start their readers."""
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Camera).where(Camera.enabled == True))
             cameras = result.scalars().all()
@@ -27,6 +26,18 @@ class StreamManager:
                 except Exception as e:
                     logger.error(f"Failed to start camera {cam.id}: {e}")
 
+    async def ensure_reader(self, camera_id: UUID, rtsp_url: str) -> RTSPReader:
+        """Return an existing reader or create/start a new one."""
+        if camera_id in self.readers:
+            return self.readers[camera_id]
+        reader = RTSPReader(camera_id, rtsp_url)
+        await reader.start()
+        self.readers[camera_id] = reader
+        return reader
+
     async def stop_all(self):
         for reader in self.readers.values():
             await reader.stop()
+
+# Global singleton – import this everywhere
+stream_manager = StreamManager()

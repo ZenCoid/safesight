@@ -2,10 +2,11 @@ from sqlalchemy import text
 import asyncio
 import time
 import logging
+import shutil
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.database import engine, Base, AsyncSessionLocal
-from core.stream_manager import StreamManager
+from core.stream_manager import stream_manager
 from engine.escalation import escalation_state
 from api.routes import cameras, rules, alerts
 from api.ws import live
@@ -15,9 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 
 app = FastAPI(title="SafeSight AI Platform")
 
-# ------------------------------------------------------------
-# CORS – allow the React frontend to talk to the API
-# ------------------------------------------------------------
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -26,19 +25,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-stream_manager = StreamManager()
+# ------------------------------------------------------------
+# Disk Monitor (warns if free space < 5 GB)
+# ------------------------------------------------------------
+async def disk_monitor():
+    while True:
+        try:
+            usage = shutil.disk_usage('.')
+            free_gb = usage.free / (1024 ** 3)
+            if free_gb < 5.0:
+                logger.critical(f"⚠️ LOW DISK SPACE: {free_gb:.1f} GB free. MinIO snapshots paused!")
+            else:
+                logger.debug(f"Disk OK: {free_gb:.1f} GB free")
+        except Exception as e:
+            logger.error(f"Disk check failed: {e}")
+        await asyncio.sleep(120)
 
 # ------------------------------------------------------------
-# Database Heartbeat with 500ms latency alert
+# Database Heartbeat
 # ------------------------------------------------------------
 async def db_heartbeat():
-    """Periodically check DB connection latency. Alerts if > 500ms."""
     while True:
         try:
             start = time.monotonic()
             async with AsyncSessionLocal() as session:
                 await session.execute(text("SELECT 1"))
-            latency = (time.monotonic() - start) * 1000  # ms
+            latency = (time.monotonic() - start) * 1000
             if latency > 500:
                 logger.warning(f"⚠️ DB heartbeat latency {latency:.1f} ms exceeds 500 ms threshold!")
             else:
@@ -48,10 +60,9 @@ async def db_heartbeat():
         await asyncio.sleep(60)
 
 # ------------------------------------------------------------
-# Escalation background loop
+# Escalation loop
 # ------------------------------------------------------------
 async def escalation_loop():
-    """Run escalation state checks every 10 seconds."""
     while True:
         try:
             await escalation_state.tick()
@@ -61,25 +72,24 @@ async def escalation_loop():
 
 @app.on_event("startup")
 async def startup():
-    # Create tables (in development) – use Alembic for production
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    # Start stream manager
+    # Start stream manager (uses global instance)
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(stream_manager.start_all_from_db())
     except RuntimeError:
         logger.error("No running event loop – cannot start stream manager")
-    # Start escalation loop
+    # Background tasks
     asyncio.create_task(escalation_loop())
-    # Start DB heartbeat
     asyncio.create_task(db_heartbeat())
+    asyncio.create_task(disk_monitor())
 
 # REST routes
 app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
 app.include_router(rules.router, prefix="/rules", tags=["rules"])
 app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
-# WebSocket overlay
+# WebSocket
 app.include_router(live.router, prefix="/ws", tags=["live"])
 
 if __name__ == "__main__":
