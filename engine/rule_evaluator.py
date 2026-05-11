@@ -244,7 +244,7 @@ class RuleEvaluator:
             viol = ViolationEvent(
                 rule_id=self.rule.rule_id,
                 camera_id=cam_id,
-                detection_snapshot=det_event.dict(),
+                detection_snapshot=det_event.model_dump(),
                 severity="warning",
             )
             session.add(viol)

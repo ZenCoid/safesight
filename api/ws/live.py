@@ -35,4 +35,4 @@ async def live_overlay(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
-# The ingestion pipeline can later call: manager.broadcast(detection_event.dict())
+# The ingestion pipeline can later call: manager.broadcast(detection_event.model_dump())

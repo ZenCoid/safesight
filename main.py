@@ -35,6 +35,18 @@ async def db_heartbeat():
             logger.error(f"❌ DB heartbeat failed: {e}")
         await asyncio.sleep(60)
 
+# ------------------------------------------------------------
+# Escalation background loop
+# ------------------------------------------------------------
+async def escalation_loop():
+    """Run escalation state checks every 10 seconds."""
+    while True:
+        try:
+            await escalation_state.tick()
+        except Exception as e:
+            logger.error(f"Escalation tick failed: {e}")
+        await asyncio.sleep(10)
+
 @app.on_event("startup")
 async def startup():
     # Create tables (in development) – use Alembic for production
@@ -51,4 +63,13 @@ async def startup():
     # Start DB heartbeat
     asyncio.create_task(db_heartbeat())
 
-# Rest of routes unchanged ...
+# REST routes
+app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
+app.include_router(rules.router, prefix="/rules", tags=["rules"])
+app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
+# WebSocket overlay
+app.include_router(live.router, prefix="/ws", tags=["live"])
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
