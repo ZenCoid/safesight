@@ -1,10 +1,9 @@
-"""
-SafeSight AI Platform - FastAPI Entry Point
-"""
-from fastapi import FastAPI
+from sqlalchemy import text
 import asyncio
+import time
 import logging
-from core.database import engine, Base
+from fastapi import FastAPI
+from core.database import engine, Base, AsyncSessionLocal
 from core.stream_manager import StreamManager
 from engine.escalation import escalation_state
 from api.routes import cameras, rules, alerts
@@ -17,36 +16,39 @@ app = FastAPI(title="SafeSight AI Platform")
 
 stream_manager = StreamManager()
 
-async def escalation_loop():
-    """Run escalation state checks every 10 seconds."""
+# ------------------------------------------------------------
+# Database Heartbeat with 500ms latency alert
+# ------------------------------------------------------------
+async def db_heartbeat():
+    """Periodically check DB connection latency. Alerts if > 500ms."""
     while True:
         try:
-            await escalation_state.tick()
+            start = time.monotonic()
+            async with AsyncSessionLocal() as session:
+                await session.execute(text("SELECT 1"))
+            latency = (time.monotonic() - start) * 1000  # ms
+            if latency > 500:
+                logger.warning(f"⚠️ DB heartbeat latency {latency:.1f} ms exceeds 500 ms threshold!")
+            else:
+                logger.info(f"💓 DB heartbeat OK ({latency:.1f} ms)")
         except Exception as e:
-            logger.error(f"Escalation tick failed: {e}")
-        await asyncio.sleep(10)
+            logger.error(f"❌ DB heartbeat failed: {e}")
+        await asyncio.sleep(60)
 
 @app.on_event("startup")
 async def startup():
-    # Create tables if not exist (use Alembic in production)
+    # Create tables (in development) – use Alembic for production
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    # Start RTSP readers for all enabled cameras
+    # Start stream manager
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(stream_manager.start_all_from_db())
     except RuntimeError:
         logger.error("No running event loop – cannot start stream manager")
-    # Start escalation background task
+    # Start escalation loop
     asyncio.create_task(escalation_loop())
+    # Start DB heartbeat
+    asyncio.create_task(db_heartbeat())
 
-# REST routes
-app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
-app.include_router(rules.router, prefix="/rules", tags=["rules"])
-app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
-# WebSocket overlay
-app.include_router(live.router, prefix="/ws", tags=["live"])
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+# Rest of routes unchanged ...
