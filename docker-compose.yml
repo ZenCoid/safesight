@@ -1,0 +1,64 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: safesight-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: safesight
+      POSTGRES_PASSWORD: safesight_pass
+      POSTGRES_DB: safesight_db
+      TIMESCALEDB_TELEMETRY: off
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U safesight -d safesight_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - safesight-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: safesight-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - safesight-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: safesight-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - safesight-net
+
+networks:
+  safesight-net:
+    driver: bridge
