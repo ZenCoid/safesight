@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "safesight-clips"
     RFDETR_MODEL_PATH: str = "models/rfdetr_base.pth"
-    TEACHER_MODEL_PATH: str = "models/teacher_best.pt"  # fallback YOLO for pseudo-labelling
+    TEACHER_MODEL_PATH: str = "models/teacher_best.pt"
     LOW_CONFIDENCE_THRESHOLD: float = 0.3
     PSEUDO_LABEL_BATCH_SIZE: int = 32
 

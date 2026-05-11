@@ -5,11 +5,11 @@ from uuid import UUID
 class DetectionObject(BaseModel):
     class_name: str
     confidence: float
-    bbox: List[float]  # [xmin, ymin, xmax, ymax] normalized 0-1
+    bbox: List[float]
 
 class DetectionEvent(BaseModel):
     camera_id: UUID
     frame_id: int
-    timestamp: float  # epoch
+    timestamp: float
     objects: List[DetectionObject]
-    raw_confidence_distribution: Optional[dict] = {}  # for teacher-student loop
+    raw_confidence_distribution: Optional[dict] = {}

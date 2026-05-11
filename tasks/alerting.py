@@ -1,13 +1,15 @@
-from celery_app import celery
-import requests
+import logging
+from core.celery_app import celery_app
 
-@celery.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_whatsapp_alert(self, violation_event_id, phone_number, message):
-    # Integrate with Twilio/Business API
-    # ...
-    pass
+logger = logging.getLogger(__name__)
 
-@celery.task
-def trigger_siren(camera_location):
-    # Call hardware API
-    pass
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_alert(self, violation_event_id, channel, escalation_level):
+    """
+    Dispatch alert via the given channel (WhatsApp, email, siren, etc.)
+    """
+    # Placeholder: implement actual integrations
+    logger.info(f"ALERT: Violation {violation_event_id} level {escalation_level} via {channel}")
+    # Example: for WhatsApp, call Twilio API
+    # For siren, trigger GPIO or cloud API
+    return f"Alert sent to {channel}"

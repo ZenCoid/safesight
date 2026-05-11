@@ -4,6 +4,8 @@ import logging
 from typing import AsyncIterator
 from uuid import UUID
 
+logger = logging.getLogger(__name__)
+
 class RTSPReader:
     def __init__(self, camera_id: UUID, rtsp_url: str, buffer_size: int = 10):
         self.camera_id = camera_id
@@ -14,7 +16,6 @@ class RTSPReader:
 
     async def start(self):
         self._running = True
-        # GStreamer pipeline for RTSP: low latency, H.264 hardware decode
         gst_pipeline = (
             f"rtspsrc location={self.rtsp_url} latency=0 ! "
             "rtph264depay ! h264parse ! nvv4l2decoder ! videoconvert ! "
@@ -30,10 +31,9 @@ class RTSPReader:
         while self._running:
             ret, frame = await loop.run_in_executor(None, self.cap.read)
             if not ret:
-                logging.warning(f"Camera {self.camera_id} frame read failed, reconnecting...")
+                logger.warning(f"Camera {self.camera_id} frame read failed, retrying...")
                 await asyncio.sleep(1)
                 continue
-            # put frame into buffer; block if full to throttle
             await self.buffer.put((self.camera_id, frame))
 
     async def get_frames(self) -> AsyncIterator:

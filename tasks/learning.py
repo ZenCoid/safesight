@@ -1,20 +1,23 @@
 import json
 import torch
 from minio import Minio
-from safesight.core.config import settings
-from safesight.ingestion.detector import RFDETRDetector
+from core.config import settings
+from core.celery_app import celery_app
+from ingestion.detector import RFDETRDetector
 
-minio_client = Minio(settings.MINIO_ENDPOINT, ...)
+minio_client = Minio(
+    settings.MINIO_ENDPOINT,
+    access_key=settings.MINIO_ACCESS_KEY,
+    secret_key=settings.MINIO_SECRET_KEY,
+    secure=False
+)
 
-@celery.task
+@celery_app.task
 def pseudo_label_low_confidence_frames():
-    # Fetch recent frames from MinIO bucket "low-conf-frames" that were uploaded
-    # when detector confidence was < threshold.
+    """
+    Fetch low-confidence frames from MinIO, run teacher model, and produce labels.
+    """
+    # Placeholder: actual implementation depends on data pipeline
     objects = minio_client.list_objects(settings.MINIO_BUCKET, prefix="low-conf/")
-    # Download each, run teacher model (YOLO fallback), produce labels
-    teacher = torch.hub.load('ultralytics/yolov5', 'yolov5m')  # example teacher
-    for obj in objects:
-        img_data = minio_client.get_object(...)
-        # run teacher, create pseudo label, store as YOLO format
-        # ...
-    # Trigger a fine-tuning job (or scheduled pipeline)
+    # ... labeling logic
+    return f"Processed {len(list(objects))} frames"
