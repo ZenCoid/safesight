@@ -3,6 +3,7 @@ import asyncio
 import time
 import logging
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from core.database import engine, Base, AsyncSessionLocal
 from core.stream_manager import StreamManager
 from engine.escalation import escalation_state
@@ -13,6 +14,17 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 app = FastAPI(title="SafeSight AI Platform")
+
+# ------------------------------------------------------------
+# CORS – allow the React frontend to talk to the API
+# ------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 stream_manager = StreamManager()
 
