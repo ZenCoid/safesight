@@ -3,7 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
 from models.alert import Alert
-from schemas.alert import AlertRead  # we'll define
+from models.violation import ViolationEvent
+from schemas.alert import AlertRead
 from core.database import AsyncSessionLocal
 
 router = APIRouter()
@@ -23,7 +24,16 @@ async def acknowledge_alert(alert_id: str, db: AsyncSession = Depends(get_db)):
     alert = await db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    alert.sent = True  # or a separate 'acknowledged' field? We'll use sent for now.
+
+    # Mark the violation event itself as acknowledged (not the alert.sent flag)
+    viol = await db.get(ViolationEvent, alert.violation_event_id)
+    if viol:
+        viol.acknowledged = True
+        await db.commit()
+        await db.refresh(viol)
+
+    # Also update the alert status for UI consistency
+    alert.sent = True
     await db.commit()
     await db.refresh(alert)
     return alert

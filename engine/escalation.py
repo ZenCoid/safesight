@@ -1,9 +1,10 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 from uuid import UUID
 from sqlalchemy import select
 from models.violation import ViolationEvent
+from models.rule import Rule
 from models.alert import Alert
 from core.database import AsyncSessionLocal
 from schemas.rule_schema import RuleDefinition, EscalationLevel
@@ -14,63 +15,74 @@ logger = logging.getLogger(__name__)
 class EscalationState:
     """Tracks active violations and triggers alerts according to escalation levels."""
     def __init__(self):
-        # In production, use Redis for distributed state
-        self._violations: Dict[UUID, datetime] = {}
-        self._escalations_sent: Dict[UUID, int] = {}  # violation_id -> last level sent
+        self._violations: Dict[UUID, datetime] = {}       # event_id -> start time
+        self._escalations_sent: Dict[UUID, int] = {}      # event_id -> last level dispatched
 
-    async def handle_violation_start(self, violation_id: UUID, rule: RuleDefinition):
-        self._violations[violation_id] = datetime.utcnow()
-        self._escalations_sent[violation_id] = 0
-        # Level 1 immediate
-        await self._dispatch_level(violation_id, rule, 1)
+    async def handle_violation_start(self, event_id: UUID, rule: RuleDefinition):
+        """Called when a new violation is created."""
+        self._violations[event_id] = datetime.now(timezone.utc)
+        self._escalations_sent[event_id] = 0
+        # Immediate Level 1 dispatch
+        await self._dispatch_level(event_id, rule, 1)
 
-    async def handle_violation_end(self, violation_id: UUID):
-        self._violations.pop(violation_id, None)
-        self._escalations_sent.pop(violation_id, None)
+    async def handle_violation_end(self, event_id: UUID):
+        """Called when a violation is acknowledged or resolved."""
+        self._violations.pop(event_id, None)
+        self._escalations_sent.pop(event_id, None)
 
     async def tick(self):
-        """Periodic check for escalation deadlines."""
-        now = datetime.utcnow()
-        for viol_id, start_time in list(self._violations.items()):
-            # Fetch rule and state from DB to get escalation levels
+        """Periodic check for pending escalation levels."""
+        now = datetime.now(timezone.utc)
+        for event_id, start_time in list(self._violations.items()):
             async with AsyncSessionLocal() as session:
-                viol = await session.get(ViolationEvent, viol_id)
+                # Fetch violation event by event_id (not time)
+                result = await session.execute(
+                    select(ViolationEvent).where(ViolationEvent.event_id == event_id)
+                )
+                viol = result.scalar_one_or_none()
                 if not viol or viol.acknowledged:
-                    await self.handle_violation_end(viol_id)
+                    await self.handle_violation_end(event_id)
                     continue
 
-                # Get rule definition
-                rule_q = await session.execute(select(Rule).where(Rule.id == viol.rule_id))
-                rule = rule_q.scalar_one_or_none()
-                if not rule:
+                # Fetch the rule definition
+                rule_result = await session.execute(
+                    select(Rule).where(Rule.id == viol.rule_id)
+                )
+                rule_row = rule_result.scalar_one_or_none()
+                if not rule_row:
                     continue
-                rule_def = RuleDefinition(**rule.definition)  # parse JSON
+                rule_def = RuleDefinition(**rule_row.definition)
 
-            elapsed = (now - start_time).total_seconds()
-            last_level = self._escalations_sent.get(viol_id, 0)
+                elapsed = (now - start_time).total_seconds()
+                last_level = self._escalations_sent.get(event_id, 0)
 
-            for level in rule_def.escalation_levels:
-                # level is EscalationLevel object; we need to check delay_seconds and unacknowledged
-                # Level index 1-based: first is level 1, second level 2, etc.
-                # We assume escalation_levels are ordered: 0 -> L1, 1 -> L2, ...
-                idx = rule_def.escalation_levels.index(level) + 1
-                if idx <= last_level:
-                    continue
-                if level.delay_seconds > 0 and elapsed >= level.delay_seconds:
-                    # Check unacknowledged condition if set
-                    if level.unacknowledged_seconds and not viol.acknowledged:
-                        if elapsed < level.unacknowledged_seconds:
-                            continue
-                    await self._dispatch_level(viol_id, rule_def, idx)
+                # Check each level that hasn't been dispatched yet
+                for idx, level in enumerate(rule_def.escalation_levels, start=1):
+                    if idx <= last_level:
+                        continue
 
-    async def _dispatch_level(self, violation_id: UUID, rule: RuleDefinition, level: int):
-        # Find the EscalationLevel for this level (1-indexed)
-        if level > len(rule.escalation_levels):
+                    should_fire = False
+                    if level.unacknowledged_seconds is not None:
+                        # Fire if violation is still unacknowledged after the specified time
+                        if not viol.acknowledged and elapsed >= level.unacknowledged_seconds:
+                            should_fire = True
+                    else:
+                        # Fire based on simple delay (including 0 second delay for immediate)
+                        if elapsed >= level.delay_seconds:
+                            should_fire = True
+
+                    if should_fire:
+                        await self._dispatch_level(event_id, rule_def, idx)
+                        break  # dispatch one level per tick to respect order
+
+    async def _dispatch_level(self, event_id: UUID, rule_def: RuleDefinition, level: int):
+        if level > len(rule_def.escalation_levels):
             return
-        esc = rule.escalation_levels[level-1]
+        esc = rule_def.escalation_levels[level - 1]
         for channel in esc.channels:
-            celery_app.send_task("tasks.alerting.send_alert", args=[violation_id, channel, level])
-        self._escalations_sent[violation_id] = level
+            celery_app.send_task("tasks.alerting.send_alert", args=[str(event_id), channel, level])
+        self._escalations_sent[event_id] = level
+        logger.info(f"Dispatched level {level} for violation {event_id} via {esc.channels}")
 
-# Global singleton (will be used by a background task)
+# Global singleton (will be used by background task)
 escalation_state = EscalationState()
