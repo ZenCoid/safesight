@@ -27,7 +27,7 @@ async def create_camera(cam: CameraCreate, db: AsyncSession = Depends(get_db)):
     return db_cam
 
 @router.get("/{camera_id}", response_model=CameraRead)
-async def get_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
+async def get_camera(camera_id: UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Camera).where(Camera.id == camera_id))
     cam = result.scalar_one_or_none()
     if not cam:
@@ -35,7 +35,7 @@ async def get_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
     return cam
 
 @router.delete("/{camera_id}", status_code=204)
-async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_camera(camera_id: UUID, db: AsyncSession = Depends(get_db)):
     cam = await db.get(Camera, camera_id)
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")

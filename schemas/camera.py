@@ -13,7 +13,10 @@ class CameraRead(BaseModel):
     name: str
     rtsp_url: str
     enabled: bool
+    health_status: str
+    current_fps: float
     created_at: datetime
+    updated_at: datetime
 
     class Config:
-        from_attributes = True   # new Pydantic v2
+        from_attributes = True

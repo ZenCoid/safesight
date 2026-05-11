@@ -5,6 +5,7 @@ from datetime import datetime
 class AlertRead(BaseModel):
     id: UUID
     violation_event_id: UUID
+    camera_id: UUID
     escalation_level: int
     channel: str
     sent: bool

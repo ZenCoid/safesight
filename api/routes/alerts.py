@@ -20,7 +20,7 @@ async def list_alerts(db: AsyncSession = Depends(get_db)):
     return alerts
 
 @router.post("/{alert_id}/acknowledge", response_model=AlertRead)
-async def acknowledge_alert(alert_id: str, db: AsyncSession = Depends(get_db)):
+async def acknowledge_alert(alert_id: UUID, db: AsyncSession = Depends(get_db)):
     alert = await db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
