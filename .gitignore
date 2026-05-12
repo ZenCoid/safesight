@@ -1,1 +1,28 @@
+# Docker data volumes
+data/
+
+# AI Models (downloaded, not part of source code)
+models/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment files (keep .env.example if desired)
 .env
+
+# Celery beat schedule
+celerybeat-schedule
+
+# MinIO data
+minio_data/
+
+# Any large binary files
+*.bin
+*.safetensors
+*.pth
+*.pt

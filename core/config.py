@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     SMTP_FROM: str = ""
     SMTP_TO: str = ""
 
+    # Local AI Vision Model
+    MODEL_SEARCH_PATH: str = "models/qwen-3b-int4"
+
     class Config:
         env_file = ".env"
 

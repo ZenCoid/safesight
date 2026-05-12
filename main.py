@@ -8,8 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.database import engine, Base, AsyncSessionLocal
 from core.stream_manager import stream_manager
 from engine.escalation import escalation_state
-from api.routes import cameras, rules, alerts
-from api.ws import live
+from api.routes import cameras, rules, alerts, search          # 'live' removed from here
+from api.ws import live as live_ws                             # already correct
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -89,8 +89,9 @@ async def startup():
 app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
 app.include_router(rules.router, prefix="/rules", tags=["rules"])
 app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
+app.include_router(search.router, prefix="/v1", tags=["AI Search"])
 # WebSocket
-app.include_router(live.router, prefix="/ws", tags=["live"])
+app.include_router(live_ws.router, prefix="/ws", tags=["live"])
 
 if __name__ == "__main__":
     import uvicorn
