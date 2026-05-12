@@ -8,8 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.database import engine, Base, AsyncSessionLocal
 from core.stream_manager import stream_manager
 from engine.escalation import escalation_state
-from api.routes import cameras, rules, alerts, search          # 'live' removed from here
-from api.ws import live as live_ws                             # already correct
+from api.routes import cameras, rules, alerts, search
+from api.ws import live as live_ws
+from core.pinned_scheduler import pinned_search_loop      # NEW
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -70,6 +71,9 @@ async def escalation_loop():
             logger.error(f"Escalation tick failed: {e}")
         await asyncio.sleep(10)
 
+# ------------------------------------------------------------
+# Startup event
+# ------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
@@ -84,6 +88,7 @@ async def startup():
     asyncio.create_task(escalation_loop())
     asyncio.create_task(db_heartbeat())
     asyncio.create_task(disk_monitor())
+    asyncio.create_task(pinned_search_loop())           # <-- NEW
 
 # REST routes
 app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
