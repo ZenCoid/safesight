@@ -15,8 +15,16 @@ class Settings(BaseSettings):
     # Twilio WhatsApp
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
-    TWILIO_WHATSAPP_NUMBER: str = ""   # e.g. "whatsapp:+14155238886"
-    TWILIO_TO_NUMBER: str = ""         # recipient number, e.g. "whatsapp:+923001234567"
+    TWILIO_WHATSAPP_NUMBER: str = ""
+    TWILIO_TO_NUMBER: str = ""
+
+    # SMTP Email
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    SMTP_TO: str = ""
 
     class Config:
         env_file = ".env"

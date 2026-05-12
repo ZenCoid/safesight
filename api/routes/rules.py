@@ -20,7 +20,7 @@ async def create_rule(rule_def: RuleDefinition, db: AsyncSession = Depends(get_d
         name=rule_def.rule_name,
         version=rule_def.version,
         enabled=rule_def.enabled,
-        definition=rule_def.model_dump()
+        definition=rule_def.model_dump(mode='json')  # <-- converts UUIDs to strings
     )
     db.add(db_rule)
     await db.commit()
@@ -49,7 +49,7 @@ async def update_rule(rule_id: UUID, rule_def: RuleDefinition, db: AsyncSession 
     rule.name = rule_def.rule_name
     rule.version = rule_def.version
     rule.enabled = rule_def.enabled
-    rule.definition = rule_def.model_dump()
+    rule.definition = rule_def.model_dump(mode='json')
     await db.commit()
     await db.refresh(rule)
     return RuleDefinition(**rule.definition)
