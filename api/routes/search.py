@@ -1,4 +1,9 @@
-import asyncio, logging, io, json
+import asyncio
+import logging
+import io
+import json
+import hashlib
+import os
 from pathlib import Path
 from typing import Optional, List
 import numpy as np
@@ -40,7 +45,7 @@ async def get_pipe():
     return _pipe
 
 # ------------------------------------------------------------------
-# Alert deduplication (prevent repeated WhatsApp/email spam)
+# Alert deduplication
 # ------------------------------------------------------------------
 _alert_cache: set[str] = set()
 _alert_lock = asyncio.Lock()
@@ -97,9 +102,8 @@ class PinnedSearchResponse(BaseModel):
 async def process_search(query: str, minio_key: str,
                          camera_id: Optional[str] = None,
                          rule_id: Optional[str] = None,
-                         channel: str = "whatsapp") -> dict:
-    """Run VLM on a single MinIO frame, auto‑create violation if present
-       and channel is a real alert channel."""
+                         channel: str = "whatsapp",
+                         allow_alert: bool = True) -> dict:
     pipe = await get_pipe()
     minio_client = Minio(settings.MINIO_ENDPOINT,
                          access_key=settings.MINIO_ACCESS_KEY,
@@ -115,13 +119,23 @@ async def process_search(query: str, minio_key: str,
         logger.error(f"Failed to fetch {minio_key}: {e}")
         return {"present": False, "confidence": 0.0, "description": str(e)}
 
+    image_hash = hashlib.sha256(frame_bytes).hexdigest()
+
     image = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
-    image = image.resize((168, 168))
-    image_data = np.array(image).reshape(1, 168, 168, 3).astype(np.uint8)
+    image_resized = image.resize((168, 168))
+    image_data = np.array(image_resized).reshape(1, 168, 168, 3).astype(np.uint8)
     image_tensor = ov.Tensor(image_data)
 
-    prompt = f"Question: {query}\nAnswer with JSON: {{\"present\": true/false, \"confidence\": 0.0-1.0, \"description\": \"short\"}}"
-    result = pipe.generate(prompt, image=image_tensor, max_new_tokens=30)
+    prompt = (
+        f"Question: {query}\n"
+        "You are an AI surveillance operator. Look at the image and answer with a JSON object.\n"
+        "Focus on Human‑Object Interactions: Violence (weapons, fighting), Property (theft, vandalism), "
+        "Public Safety (crowd, fire, accidents).\n"
+        "If the described event is present, set 'present' to true and 'description' to a precise summary.\n"
+        "If not, set 'present' to false and 'description' to what you actually see.\n"
+        'Format: {"present": true/false, "confidence": 0.0-1.0, "description": "short string"}'
+    )
+    result = pipe.generate(prompt, image=image_tensor, max_new_tokens=40)
     answer = result.texts[0]
 
     logger.info(f"🔍 VLM answer for query='{query}' key='{minio_key}': {answer}")
@@ -134,37 +148,42 @@ async def process_search(query: str, minio_key: str,
 
     logger.info(f"📊 Parsed result: present={parsed.get('present')}, confidence={parsed.get('confidence')}")
 
-    # Only create violation + escalate if channel is a real alert channel
-    if parsed.get("present", False) and channel in ("whatsapp", "email"):
+    present = parsed.get("present", False)
+    description = parsed.get("description", "")
+    confidence = parsed.get("confidence", 0.7)
+
+    if present and channel in ("whatsapp", "email") and allow_alert:
         cache_key = f"{query}::{minio_key}"
         if await _can_alert(cache_key):
             logger.info("🚨 Creating violation + escalation")
             asyncio.create_task(
-                _create_violation_and_escalate(
+                create_violation_and_escalate(
                     query=query,
                     minio_key=minio_key,
                     raw_answer=answer,
-                    confidence=parsed.get("confidence", 0.7),
-                    description=parsed.get("description", ""),
+                    confidence=confidence,
+                    description=description,
                     camera_id=camera_id,
                     rule_id=rule_id,
                     channel=channel,
+                    image_hash=image_hash,
                 )
             )
         else:
             logger.info(f"⏭️ Skipping duplicate alert for {cache_key}")
     else:
-        logger.info(f"✅ No violation: VLM returned present=false or channel is not alertable")
+        logger.info("✅ No violation or alerting disabled")
 
-    return parsed
+    return {"present": present, "confidence": confidence, "description": description}
 
-async def _create_violation_and_escalate(query: str, minio_key: str,
+
+async def create_violation_and_escalate(query: str, minio_key: str,
                                          raw_answer: str, confidence: float,
                                          description: str,
                                          camera_id: Optional[str],
                                          rule_id: Optional[str],
-                                         channel: str):
-    """Persist ViolationEvent and trigger escalation with the given channel."""
+                                         channel: str,
+                                         image_hash: str = ""):
     event_id = uuid4()
     snapshot = {
         "query": query,
@@ -173,6 +192,7 @@ async def _create_violation_and_escalate(query: str, minio_key: str,
         "confidence": confidence,
         "description": description,
         "vlm_model": "Qwen2.5-VL-3B-Instruct-ov-int4-genai",
+        "image_hash": image_hash,
     }
 
     try:
@@ -185,6 +205,7 @@ async def _create_violation_and_escalate(query: str, minio_key: str,
                 detection_snapshot=snapshot,
                 severity="warning",
                 acknowledged=False,
+                image_hash=image_hash,
             )
             session.add(viol)
             await session.commit()
@@ -194,6 +215,27 @@ async def _create_violation_and_escalate(query: str, minio_key: str,
         logger.error(f"❌ Failed to save ViolationEvent: {e}")
         return
 
+    # Sovereign Training Pool
+    try:
+        training_dir = Path(settings.TRAINING_POOL_DIR)
+        training_dir.mkdir(parents=True, exist_ok=True)
+        minio_client = Minio(settings.MINIO_ENDPOINT,
+                             access_key=settings.MINIO_ACCESS_KEY,
+                             secret_key=settings.MINIO_SECRET_KEY,
+                             secure=False)
+        resp = minio_client.get_object(settings.MINIO_BUCKET, minio_key)
+        frame_bytes = resp.read()
+        resp.close()
+        resp.release_conn()
+        img_path = training_dir / f"{event_id}.jpg"
+        img_path.write_bytes(frame_bytes)
+        label_path = training_dir / f"{event_id}.txt"
+        label_path.write_text(f"query: {query}\nvlm_reasoning: {description}\nconfidence: {confidence}\nimage_hash: {image_hash}\n")
+        logger.info(f"📁 Training sample saved to {training_dir}")
+    except Exception as e:
+        logger.error(f"❌ Training pool save failed: {e}")
+
+    # Escalation
     rule_def = RuleDefinition(
         rule_id=viol.rule_id,
         rule_name="VLM Auto‑Rule",
@@ -219,6 +261,7 @@ async def _create_violation_and_escalate(query: str, minio_key: str,
         logger.info(f"📤 Escalation triggered for {event_id} via {channel}")
     except Exception as e:
         logger.error(f"❌ Escalation failed: {e}")
+
 
 # ------------------------------------------------------------------
 # Immediate Search
@@ -255,6 +298,7 @@ async def zero_shot_search(req: SearchRequest):
         camera_id=req.camera_id,
         rule_id=req.rule_id,
     )
+
 
 # ------------------------------------------------------------------
 # Pinned Search Management

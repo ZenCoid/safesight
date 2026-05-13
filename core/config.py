@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Local AI Vision Model
     MODEL_SEARCH_PATH: str = "models/qwen-3b-int4"
 
+    # Autonomous Live Capture
+    LIVE_CAPTURE_INTERVAL_SECONDS: int = 10
+
+    # Sovereign Training Pool
+    TRAINING_POOL_DIR: str = "E:/safesight/training_pool"
+
     class Config:
         env_file = ".env"
 

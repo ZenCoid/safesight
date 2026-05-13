@@ -11,13 +11,13 @@ from engine.escalation import escalation_state
 from api.routes import cameras, rules, alerts, search, minio_upload, forensic
 from api.ws import live as live_ws
 from core.pinned_scheduler import pinned_search_loop
+from core.live_capture import live_capture_loop
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 app = FastAPI(title="SafeSight AI Platform")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -26,9 +26,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------
-# Disk Monitor (warns if free space < 5 GB)
-# ------------------------------------------------------------
 async def disk_monitor():
     while True:
         try:
@@ -42,9 +39,6 @@ async def disk_monitor():
             logger.error(f"Disk check failed: {e}")
         await asyncio.sleep(120)
 
-# ------------------------------------------------------------
-# Database Heartbeat
-# ------------------------------------------------------------
 async def db_heartbeat():
     while True:
         try:
@@ -60,9 +54,6 @@ async def db_heartbeat():
             logger.error(f"❌ DB heartbeat failed: {e}")
         await asyncio.sleep(60)
 
-# ------------------------------------------------------------
-# Escalation loop
-# ------------------------------------------------------------
 async def escalation_loop():
     while True:
         try:
@@ -75,26 +66,23 @@ async def escalation_loop():
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    # Start stream manager (uses global instance)
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(stream_manager.start_all_from_db())
     except RuntimeError:
         logger.error("No running event loop – cannot start stream manager")
-    # Background tasks
     asyncio.create_task(escalation_loop())
     asyncio.create_task(db_heartbeat())
     asyncio.create_task(disk_monitor())
     asyncio.create_task(pinned_search_loop())
+    asyncio.create_task(live_capture_loop())
 
-# REST routes
 app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
 app.include_router(rules.router, prefix="/rules", tags=["rules"])
 app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 app.include_router(search.router, prefix="/v1", tags=["AI Search"])
 app.include_router(minio_upload.router, prefix="/minio", tags=["MinIO"])
 app.include_router(forensic.router, prefix="/v1", tags=["Forensic"])
-# WebSocket
 app.include_router(live_ws.router, prefix="/ws", tags=["live"])
 
 if __name__ == "__main__":

@@ -14,12 +14,10 @@ class ViolationEvent(Base):
     severity = Column(String, default="warning")
     acknowledged = Column(Boolean, default=False)
     clip_path = Column(String)
+    image_hash = Column(String, nullable=True)
 
-    # Forensic search indexes
     __table_args__ = (
         Index("ix_violation_camera_id", "camera_id"),
         Index("ix_violation_time_camera", "time", "camera_id"),
         Index("ix_violation_event_id", "event_id"),
     )
-
-# After table creation, execute: SELECT create_hypertable('violation_events', 'time');
