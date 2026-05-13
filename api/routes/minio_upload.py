@@ -1,4 +1,5 @@
 import hashlib
+import io
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from minio import Minio
 from core.config import settings
@@ -18,24 +19,19 @@ async def upload_image(file: UploadFile = File(...)):
         secure=False,
     )
 
-    # Create bucket if not present
     if not minio_client.bucket_exists(settings.MINIO_BUCKET):
         minio_client.make_bucket(settings.MINIO_BUCKET)
 
-    # Read file bytes and compute SHA‑256 hash
     file_bytes = await file.read()
     file_hash = hashlib.sha256(file_bytes).hexdigest()
 
-    # Determine extension (default to jpg)
     ext = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
     object_name = f"uploaded/{file_hash}.{ext}"
 
-    # If object already exists, just return its name (no duplicate)
     try:
         minio_client.stat_object(settings.MINIO_BUCKET, object_name)
         return {"object_name": object_name, "already_exists": True}
     except Exception:
-        # Object doesn't exist – upload it
         pass
 
     try:

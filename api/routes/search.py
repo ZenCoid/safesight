@@ -117,7 +117,7 @@ async def process_search(query: str, minio_key: str,
         resp.release_conn()
     except Exception as e:
         logger.error(f"Failed to fetch {minio_key}: {e}")
-        return {"present": False, "confidence": 0.0, "description": str(e)}
+        return {"present": False, "confidence": 0.0, "description": str(e), "raw_answer": ""}
 
     image_hash = hashlib.sha256(frame_bytes).hexdigest()
 
@@ -174,7 +174,7 @@ async def process_search(query: str, minio_key: str,
     else:
         logger.info("✅ No violation or alerting disabled")
 
-    return {"present": present, "confidence": confidence, "description": description}
+    return {"present": present, "confidence": confidence, "description": description, "raw_answer": answer}
 
 
 async def create_violation_and_escalate(query: str, minio_key: str,
