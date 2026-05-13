@@ -2,10 +2,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
-from uuid import UUID
+from uuid import UUID, uuid4
+import random
+import time
+from minio import Minio
+from core.config import settings
 from models.rule import Rule
 from schemas.rule_schema import RuleDefinition
+from schemas.detection import DetectionEvent, DetectionObject
+from engine.rule_evaluator import RuleEvaluator
 from core.database import AsyncSessionLocal
+
+import logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -20,7 +29,7 @@ async def create_rule(rule_def: RuleDefinition, db: AsyncSession = Depends(get_d
         name=rule_def.rule_name,
         version=rule_def.version,
         enabled=rule_def.enabled,
-        definition=rule_def.model_dump(mode='json')  # <-- converts UUIDs to strings
+        definition=rule_def.model_dump(mode='json')
     )
     db.add(db_rule)
     await db.commit()
@@ -61,3 +70,81 @@ async def delete_rule(rule_id: UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Rule not found")
     await db.delete(rule)
     await db.commit()
+    return
+
+# ------------------------------------------------------------------
+# Rule Simulation – evaluate a proposed rule against recent frames
+# ------------------------------------------------------------------
+@router.post("/simulate", summary="Simulate a rule against recent MinIO frames")
+async def simulate_rule(rule_def: RuleDefinition):
+    """Evaluate the proposed rule on up to 50 recent frames stored in MinIO,
+    simulating detection events and returning predicted alert density."""
+    minio_client = Minio(
+        settings.MINIO_ENDPOINT,
+        access_key=settings.MINIO_ACCESS_KEY,
+        secret_key=settings.MINIO_SECRET_KEY,
+        secure=False,
+    )
+
+    # Get recent objects from the bucket
+    try:
+        objects = list(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to list MinIO objects: {e}")
+
+    if not objects:
+        return {
+            "total_frames": 0,
+            "alerts_fired": 0,
+            "predicted_alert_density": 0.0,
+            "message": "No frames found in MinIO warehouse."
+        }
+
+    # Sort by last_modified descending, take up to 50
+    objects.sort(key=lambda o: o.last_modified, reverse=True)
+    objects = objects[:50]
+
+    total_frames = len(objects)
+    alerts_fired = 0
+
+    # For simulation, we generate random detections for each frame
+    # to mimic an object detector. Replace this with actual detector if available.
+    random.seed(42)
+    evaluator = RuleEvaluator(rule_def)
+
+    for obj in objects:
+        # Generate 0‑3 random detected objects per frame
+        num_detections = random.randint(0, 3)
+        detection_objects = []
+        for _ in range(num_detections):
+            detection_objects.append(
+                DetectionObject(
+                    class_name=random.choice(["person", "helmet", "no-helmet", "fire"]),
+                    confidence=round(random.uniform(0.3, 0.99), 2),
+                    bbox=[round(random.uniform(0.0, 1.0), 2) for _ in range(4)]
+                )
+            )
+
+        # Build a simulated detection event
+        det_event = DetectionEvent(
+            camera_id=uuid4(),
+            frame_id=random.randint(1, 1000),
+            timestamp=time.time(),
+            objects=detection_objects,
+            raw_confidence_distribution={}
+        )
+
+        # Evaluate the rule against this event
+        try:
+            if evaluator.evaluate(det_event):
+                alerts_fired += 1
+        except Exception as e:
+            logger.error(f"Rule evaluation error: {e}")
+
+    density = alerts_fired / total_frames if total_frames > 0 else 0.0
+
+    return {
+        "total_frames": total_frames,
+        "alerts_fired": alerts_fired,
+        "predicted_alert_density": density,
+    }

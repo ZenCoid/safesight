@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.database import engine, Base, AsyncSessionLocal
 from core.stream_manager import stream_manager
 from engine.escalation import escalation_state
-from api.routes import cameras, rules, alerts, search, minio_upload
+from api.routes import cameras, rules, alerts, search, minio_upload, forensic
 from api.ws import live as live_ws
 from core.pinned_scheduler import pinned_search_loop
 
@@ -75,11 +75,13 @@ async def escalation_loop():
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Start stream manager (uses global instance)
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(stream_manager.start_all_from_db())
     except RuntimeError:
         logger.error("No running event loop – cannot start stream manager")
+    # Background tasks
     asyncio.create_task(escalation_loop())
     asyncio.create_task(db_heartbeat())
     asyncio.create_task(disk_monitor())
@@ -91,6 +93,7 @@ app.include_router(rules.router, prefix="/rules", tags=["rules"])
 app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 app.include_router(search.router, prefix="/v1", tags=["AI Search"])
 app.include_router(minio_upload.router, prefix="/minio", tags=["MinIO"])
+app.include_router(forensic.router, prefix="/v1", tags=["Forensic"])
 # WebSocket
 app.include_router(live_ws.router, prefix="/ws", tags=["live"])
 
