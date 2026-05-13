@@ -1,13 +1,12 @@
 import logging
 import smtplib
+import json
 from email.message import EmailMessage
 from core.celery_app import celery_app
 from core.config import settings
 from twilio.rest import Client
 
-# Alias so Celery discovers tasks with `-A tasks.alerting`
 app = celery_app
-
 logger = logging.getLogger(__name__)
 
 
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 def send_alert(self, violation_event_id, channel, escalation_level):
     """
     Dispatch alert via the given channel.
-    Supported: whatsapp (Twilio), email (SMTP).
+    Supported: whatsapp (Twilio template), email (SMTP).
     """
     if channel == 'whatsapp':
         _send_whatsapp(violation_event_id, escalation_level)
@@ -30,19 +29,25 @@ def send_alert(self, violation_event_id, channel, escalation_level):
 
 
 def _send_whatsapp(violation_event_id, escalation_level):
+    """Send WhatsApp message using the pre‑approved Twilio Content Template."""
     try:
         client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
         message = client.messages.create(
-            body=f"🚨 SafeSight Alert\nViolation: {violation_event_id}\nLevel: {escalation_level}",
             from_=settings.TWILIO_WHATSAPP_NUMBER,
             to=settings.TWILIO_TO_NUMBER,
+            content_sid=settings.TWILIO_CONTENT_SID,
+            content_variables=json.dumps({
+                "1": str(violation_event_id),
+                "2": str(escalation_level),
+            }),
         )
-        logger.info(f"WhatsApp message sent: {message.sid}")
+        logger.info(f"WhatsApp template message sent: {message.sid}")
     except Exception as exc:
         logger.error(f"WhatsApp send failed: {exc}")
 
 
 def _send_email(violation_event_id, escalation_level):
+    """Send email alert via SMTP."""
     try:
         msg = EmailMessage()
         msg.set_content(

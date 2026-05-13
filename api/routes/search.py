@@ -1,6 +1,6 @@
 import asyncio, logging, io, json
 from pathlib import Path
-from typing import Optional, List, Callable
+from typing import Optional, List
 import numpy as np
 import openvino as ov
 from datetime import datetime, timezone
@@ -49,9 +49,9 @@ ALERT_COOLDOWN_SECONDS = 120
 async def _can_alert(cache_key: str) -> bool:
     async with _alert_lock:
         if cache_key in _alert_cache:
+            logger.info(f"⚠️ Duplicate suppressed for {cache_key}")
             return False
         _alert_cache.add(cache_key)
-        # Schedule removal after cooldown
         loop = asyncio.get_running_loop()
         loop.call_later(ALERT_COOLDOWN_SECONDS, lambda: _alert_cache.discard(cache_key))
         return True
@@ -79,7 +79,7 @@ class SearchResponse(BaseModel):
 
 class PinnedSearchRequest(BaseModel):
     query: str
-    channel: str = "whatsapp"          # or "email"
+    channel: str = "whatsapp"
     interval_frames: int = 10
     minio_keys: List[str]
     rule_id: Optional[str] = None
@@ -105,7 +105,6 @@ async def process_search(query: str, minio_key: str,
                          secret_key=settings.MINIO_SECRET_KEY,
                          secure=False)
 
-    # Fetch image
     try:
         resp = minio_client.get_object(settings.MINIO_BUCKET, minio_key)
         frame_bytes = resp.read()
@@ -115,7 +114,6 @@ async def process_search(query: str, minio_key: str,
         logger.error(f"Failed to fetch {minio_key}: {e}")
         return {"present": False, "confidence": 0.0, "description": str(e)}
 
-    # Fast preprocess (smaller image + tiny prompt)
     image = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
     image = image.resize((168, 168))
     image_data = np.array(image).reshape(1, 168, 168, 3).astype(np.uint8)
@@ -125,17 +123,21 @@ async def process_search(query: str, minio_key: str,
     result = pipe.generate(prompt, image=image_tensor, max_new_tokens=30)
     answer = result.texts[0]
 
-    # Parse JSON
+    # 🔍 DEBUG: always log what the VLM returned
+    logger.info(f"🔍 VLM answer for query='{query}' key='{minio_key}': {answer}")
+
     try:
         parsed = json.loads(answer)
     except Exception:
         present = "true" in answer.lower()
         parsed = {"present": present, "confidence": 0.7 if present else 0.3, "description": answer}
 
-    # If present and not a duplicate, create violation + escalate
+    logger.info(f"📊 Parsed result: present={parsed.get('present')}, confidence={parsed.get('confidence')}")
+
     if parsed.get("present", False):
         cache_key = f"{query}::{minio_key}"
         if await _can_alert(cache_key):
+            logger.info("🚨 Creating violation + escalation")
             asyncio.create_task(
                 _create_violation_and_escalate(
                     query=query,
@@ -149,7 +151,9 @@ async def process_search(query: str, minio_key: str,
                 )
             )
         else:
-            logger.info(f"Skipping duplicate alert for {cache_key}")
+            logger.info(f"⏭️ Skipping duplicate alert for {cache_key}")
+    else:
+        logger.info(f"✅ No violation: VLM returned present=false")
 
     return parsed
 
@@ -170,21 +174,25 @@ async def _create_violation_and_escalate(query: str, minio_key: str,
         "vlm_model": "Qwen2.5-VL-3B-Instruct-ov-int4-genai",
     }
 
-    async with AsyncSessionLocal() as session:
-        viol = ViolationEvent(
-            time=datetime.now(timezone.utc),
-            event_id=event_id,
-            rule_id=rule_id or uuid4(),
-            camera_id=camera_id or uuid4(),
-            detection_snapshot=snapshot,
-            severity="warning",
-            acknowledged=False,
-        )
-        session.add(viol)
-        await session.commit()
-        await session.refresh(viol)
+    try:
+        async with AsyncSessionLocal() as session:
+            viol = ViolationEvent(
+                time=datetime.now(timezone.utc),
+                event_id=event_id,
+                rule_id=rule_id or uuid4(),
+                camera_id=camera_id or uuid4(),
+                detection_snapshot=snapshot,
+                severity="warning",
+                acknowledged=False,
+            )
+            session.add(viol)
+            await session.commit()
+            await session.refresh(viol)
+            logger.info(f"💾 ViolationEvent saved: {event_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to save ViolationEvent: {e}")
+        return
 
-    # Use the correct channel for escalation
     rule_def = RuleDefinition(
         rule_id=viol.rule_id,
         rule_name="VLM Auto‑Rule",
@@ -198,14 +206,18 @@ async def _create_violation_and_escalate(query: str, minio_key: str,
         cooldown_seconds=30,
         schedule=None,
         escalation_levels=[{
-            "channels": [channel],           # <-- dynamic channel
+            "channels": [channel],
             "delay_seconds": 0,
             "unacknowledged_seconds": None
         }],
         multi_camera_links=[],
         condition=query,
     )
-    await escalation_state.handle_violation_start(event_id, rule_def)
+    try:
+        await escalation_state.handle_violation_start(event_id, rule_def)
+        logger.info(f"📤 Escalation triggered for {event_id} via {channel}")
+    except Exception as e:
+        logger.error(f"❌ Escalation failed: {e}")
 
 # ------------------------------------------------------------------
 # Immediate Search

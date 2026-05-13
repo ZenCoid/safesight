@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_WHATSAPP_NUMBER: str = ""
     TWILIO_TO_NUMBER: str = ""
+    TWILIO_CONTENT_SID: str = ""
 
     # SMTP Email
     SMTP_HOST: str = "smtp.gmail.com"
