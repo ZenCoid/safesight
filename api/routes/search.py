@@ -98,7 +98,8 @@ async def process_search(query: str, minio_key: str,
                          camera_id: Optional[str] = None,
                          rule_id: Optional[str] = None,
                          channel: str = "whatsapp") -> dict:
-    """Run VLM on a single MinIO frame, auto‑create violation if present."""
+    """Run VLM on a single MinIO frame, auto‑create violation if present
+       and channel is a real alert channel."""
     pipe = await get_pipe()
     minio_client = Minio(settings.MINIO_ENDPOINT,
                          access_key=settings.MINIO_ACCESS_KEY,
@@ -123,7 +124,6 @@ async def process_search(query: str, minio_key: str,
     result = pipe.generate(prompt, image=image_tensor, max_new_tokens=30)
     answer = result.texts[0]
 
-    # 🔍 DEBUG: always log what the VLM returned
     logger.info(f"🔍 VLM answer for query='{query}' key='{minio_key}': {answer}")
 
     try:
@@ -134,7 +134,8 @@ async def process_search(query: str, minio_key: str,
 
     logger.info(f"📊 Parsed result: present={parsed.get('present')}, confidence={parsed.get('confidence')}")
 
-    if parsed.get("present", False):
+    # Only create violation + escalate if channel is a real alert channel
+    if parsed.get("present", False) and channel in ("whatsapp", "email"):
         cache_key = f"{query}::{minio_key}"
         if await _can_alert(cache_key):
             logger.info("🚨 Creating violation + escalation")
@@ -153,7 +154,7 @@ async def process_search(query: str, minio_key: str,
         else:
             logger.info(f"⏭️ Skipping duplicate alert for {cache_key}")
     else:
-        logger.info(f"✅ No violation: VLM returned present=false")
+        logger.info(f"✅ No violation: VLM returned present=false or channel is not alertable")
 
     return parsed
 
