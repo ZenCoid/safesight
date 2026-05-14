@@ -2,8 +2,9 @@ import io
 import json
 import logging
 import hashlib
+import re
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import List
 from minio import Minio
 from PIL import Image
@@ -17,9 +18,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class ForensicRequest(BaseModel):
-    query: str
+    query: str = Field(..., max_length=500)
     max_frames: int = 10
     show_all: bool = False
+
+    @field_validator('query')
+    @classmethod
+    def sanitize_query(cls, v):
+        forbidden = ['__', 'exec(', 'import ', 'subprocess', 'os.', 'sys.']
+        lower = v.lower()
+        for token in forbidden:
+            if token in lower:
+                raise ValueError(f'Query contains forbidden pattern: {token}')
+        if not re.match(r'^[\w\s\-_.,!?\'\"@#$%^&*()+=:;<>\[\]{}|\\/~`]+$', v):
+            raise ValueError('Query contains invalid characters')
+        return v
 
 class ForensicResult(BaseModel):
     minio_key: str

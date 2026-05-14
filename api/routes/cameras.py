@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List, AsyncIterator
+from typing import List
 from uuid import UUID
 import cv2
 import asyncio
@@ -44,6 +44,10 @@ async def delete_camera(camera_id: UUID, db: AsyncSession = Depends(get_db)):
     cam = await db.get(Camera, camera_id)
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
+    # Stop the RTSP reader if it exists and remove from stream manager
+    reader = stream_manager.readers.pop(camera_id, None)
+    if reader:
+        await reader.stop()
     await db.delete(cam)
     await db.commit()
     return

@@ -36,12 +36,11 @@ async def acknowledge_alert(alert_id: UUID, db: AsyncSession = Depends(get_db)):
     viol = await db.get(ViolationEvent, alert.violation_event_id)
     if viol:
         viol.acknowledged = True
-        await db.commit()
-        await db.refresh(viol)
         # Notify escalation engine to stop timers and fire remaining levels
         await escalation_state.handle_violation_end(viol.event_id)
 
     alert.sent = True
+    # Commit both updates in a single transaction
     await db.commit()
     await db.refresh(alert)
     return alert

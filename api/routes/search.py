@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from PIL import Image
 
 from core.config import settings
@@ -63,7 +63,7 @@ async def _can_alert(cache_key: str) -> bool:
         return True
 
 # ------------------------------------------------------------------
-# Schemas (query sanitizers kept)
+# Schemas
 # ------------------------------------------------------------------
 class SearchRequest(BaseModel):
     query: str = Field(..., max_length=500)
@@ -71,7 +71,8 @@ class SearchRequest(BaseModel):
     camera_id: Optional[str] = None
     rule_id: Optional[str] = None
 
-    @validator('query')
+    @field_validator('query')
+    @classmethod
     def sanitize_query(cls, v):
         forbidden = ['__', 'exec(', 'import ', 'subprocess', 'os.', 'sys.']
         lower = v.lower()
@@ -102,7 +103,8 @@ class PinnedSearchRequest(BaseModel):
     rule_id: Optional[str] = None
     camera_id: Optional[str] = None
 
-    @validator('query')
+    @field_validator('query')
+    @classmethod
     def sanitize_pinned_query(cls, v):
         forbidden = ['__', 'exec(', 'import ', 'subprocess', 'os.', 'sys.']
         lower = v.lower()
@@ -228,7 +230,6 @@ async def create_violation_and_escalate(query: str, minio_key: str,
                 detection_snapshot=snapshot,
                 severity="warning",
                 acknowledged=False,
-                image_hash=image_hash,
             )
             session.add(viol)
             await session.commit()
@@ -238,7 +239,7 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         logger.error(f"❌ Failed to save ViolationEvent: {e}")
         return
 
-    # Sovereign Training Pool (unchanged)
+    # Sovereign Training Pool
     try:
         training_dir = Path(settings.TRAINING_POOL_DIR)
         training_dir.mkdir(parents=True, exist_ok=True)
@@ -286,7 +287,9 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         logger.error(f"❌ Escalation failed: {e}")
 
 
-# Immediate Search endpoint
+# ------------------------------------------------------------------
+# Immediate Search
+# ------------------------------------------------------------------
 @router.post("/search", response_model=SearchResponse)
 async def zero_shot_search(req: SearchRequest):
     if not req.minio_keys:
@@ -321,7 +324,9 @@ async def zero_shot_search(req: SearchRequest):
     )
 
 
+# ------------------------------------------------------------------
 # Pinned Search Management
+# ------------------------------------------------------------------
 pinned_searches: dict[str, dict] = {}
 
 @router.post("/pinned", response_model=PinnedSearchResponse)
