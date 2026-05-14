@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, confloat, validator
+from pydantic import BaseModel, Field, confloat, field_validator
 from typing import List, Optional, Literal
 from datetime import time
 from uuid import UUID
@@ -41,7 +41,8 @@ class RuleDefinition(BaseModel):
     multi_camera_links: List[MultiCameraLink] = []
     condition: str = "person_in_zone AND helmet_status=='none'"
 
-    @validator('condition')
+    @field_validator('condition')
+    @classmethod
     def validate_condition(cls, v):
         if not isinstance(v, str):
             raise ValueError('Condition must be a string')
@@ -54,14 +55,16 @@ class RuleDefinition(BaseModel):
             raise ValueError('Condition contains disallowed characters')
         return v
 
-    @validator('detection_modules')
+    @field_validator('detection_modules')
+    @classmethod
     def validate_modules(cls, v):
         for mod in v:
             if not re.match(r'^[a-zA-Z0-9_\- ]+$', mod):
                 raise ValueError(f'Invalid detection module name: {mod}')
         return v
 
-    @validator('rule_name')
+    @field_validator('rule_name')
+    @classmethod
     def validate_rule_name(cls, v):
         if len(v) > 128:
             raise ValueError('Rule name must be 128 characters or less')

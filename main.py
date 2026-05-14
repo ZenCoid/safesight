@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from sqlalchemy import text
 import asyncio
 import time
@@ -20,15 +21,16 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-app = FastAPI(title="SafeSight AI Platform")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
+def validate_config():
+    required = [
+        ('DATABASE_URL', settings.DATABASE_URL),
+        ('REDIS_URL', settings.REDIS_URL),
+        ('MINIO_ACCESS_KEY', settings.MINIO_ACCESS_KEY),
+        ('MINIO_SECRET_KEY', settings.MINIO_SECRET_KEY),
+    ]
+    missing = [name for name, val in required if not val]
+    if missing:
+        raise RuntimeError(f"Missing required configuration: {', '.join(missing)}. Please set them in .env file.")
 
 async def disk_monitor():
     while True:
@@ -103,15 +105,14 @@ async def ensure_minio_bucket():
     except Exception as e:
         logger.error(f"MinIO bucket check failed: {e}")
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    validate_config()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(stream_manager.start_all_from_db())
-    except RuntimeError:
-        logger.error("No running event loop – cannot start stream manager")
+    loop = asyncio.get_running_loop()
+    loop.create_task(stream_manager.start_all_from_db())
     asyncio.create_task(escalation_loop())
     asyncio.create_task(db_heartbeat())
     asyncio.create_task(disk_monitor())
@@ -119,8 +120,20 @@ async def startup():
     asyncio.create_task(live_capture_loop())
     asyncio.create_task(ensure_timescale_retention())
     asyncio.create_task(ensure_minio_bucket())
-    # Start the Redis listener for alert status broadcasts
     asyncio.create_task(alerts_ws.redis_listener())
+    yield
+    # Shutdown (if needed)
+    await stream_manager.stop_all()
+
+app = FastAPI(title="SafeSight AI Platform", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
 app.include_router(rules.router, prefix="/rules", tags=["rules"])

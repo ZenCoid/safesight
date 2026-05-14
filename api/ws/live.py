@@ -1,6 +1,6 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio, json, random, time
-from typing import Dict
+from typing import Dict, Set
 from uuid import UUID
 
 router = APIRouter()
@@ -8,29 +8,41 @@ router = APIRouter()
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
+        self.subscriptions: Dict[str, Set[str]] = {}  # ws_id -> set of camera_ids
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections[str(id(websocket))] = websocket
+        ws_id = str(id(websocket))
+        self.active_connections[ws_id] = websocket
+        self.subscriptions[ws_id] = set()
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.pop(str(id(websocket)), None)
+        ws_id = str(id(websocket))
+        self.active_connections.pop(ws_id, None)
+        self.subscriptions.pop(ws_id, None)
+
+    def subscribe(self, websocket: WebSocket, camera_id: str):
+        ws_id = str(id(websocket))
+        if ws_id in self.subscriptions:
+            self.subscriptions[ws_id].add(camera_id)
+
+    def unsubscribe(self, websocket: WebSocket, camera_id: str):
+        ws_id = str(id(websocket))
+        if ws_id in self.subscriptions:
+            self.subscriptions[ws_id].discard(camera_id)
 
     async def broadcast_to_camera(self, camera_id: str, data: dict):
-        # In practice, you'd filter by subscribed cameras.
-        # Here we just send to all connections.
-        for ws in list(self.active_connections.values()):
-            try:
-                await ws.send_json(data)
-            except:
-                pass
+        for ws_id, ws in self.active_connections.items():
+            if camera_id in self.subscriptions.get(ws_id, set()):
+                try:
+                    await ws.send_json(data)
+                except:
+                    pass
 
 manager = ConnectionManager()
 
 async def mock_detection_stream(camera_id: str):
-    """Simulate detection events for a camera."""
     while True:
-        # Generate a random detection
         det = {
             "camera_id": camera_id,
             "frame_id": random.randint(1000, 9999),
@@ -47,7 +59,6 @@ async def mock_detection_stream(camera_id: str):
         await manager.broadcast_to_camera(camera_id, det)
         await asyncio.sleep(1)
 
-# When a camera is started, launch its mock stream (for demo)
 active_mock_streams: Dict[str, asyncio.Task] = {}
 
 @router.websocket("/overlay")
@@ -56,9 +67,13 @@ async def live_overlay(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            if data.get("action") == "subscribe":
-                cam_id = data["camera_id"]
+            action = data.get("action")
+            cam_id = data.get("camera_id")
+            if action == "subscribe" and cam_id:
+                manager.subscribe(websocket, cam_id)
                 if cam_id not in active_mock_streams:
                     active_mock_streams[cam_id] = asyncio.create_task(mock_detection_stream(cam_id))
+            elif action == "unsubscribe" and cam_id:
+                manager.unsubscribe(websocket, cam_id)
     except WebSocketDisconnect:
         manager.disconnect(websocket)

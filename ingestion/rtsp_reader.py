@@ -2,7 +2,6 @@ import os
 import cv2
 import asyncio
 import logging
-import platform
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator
 from uuid import UUID
@@ -10,6 +9,8 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 class RTSPReader:
+    _env_set = False
+
     def __init__(self, camera_id: UUID, rtsp_url: str, buffer_size: int = 10):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
@@ -19,12 +20,12 @@ class RTSPReader:
 
     async def start(self):
         self._running = True
-        # Force TCP transport for reliability
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        if not RTSPReader._env_set:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            RTSPReader._env_set = True
 
         logger.info(f"Starting RTSP reader for {self.camera_id} at {self.rtsp_url}")
 
-        # Open the capture in a thread to avoid blocking the event loop
         loop = asyncio.get_running_loop()
         with ThreadPoolExecutor(max_workers=1) as pool:
             self.cap = await loop.run_in_executor(pool, self._open_capture)
@@ -36,12 +37,10 @@ class RTSPReader:
         asyncio.create_task(self._read_frames())
 
     def _open_capture(self):
-        # Set shorter timeout for opening (10 seconds)
         cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             logger.warning("FFMPEG backend failed, trying default backend")
             cap = cv2.VideoCapture(self.rtsp_url)
-        # Set read timeout to 5 seconds to avoid hanging
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
         return cap

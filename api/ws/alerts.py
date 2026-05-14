@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from typing import List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import redis.asyncio as aioredis
 from core.config import settings
@@ -12,14 +13,15 @@ REDIS_ALERT_CHANNEL = "safesight:alerts:status"
 
 class AlertConnectionManager:
     def __init__(self):
-        self.active_connections: list[WebSocket] = []
+        self.active_connections: List[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
         for connection in self.active_connections:
@@ -31,7 +33,6 @@ class AlertConnectionManager:
 manager = AlertConnectionManager()
 
 async def redis_listener():
-    """Listen to Redis channel and push messages to WebSocket clients."""
     redis = aioredis.from_url(settings.REDIS_URL)
     pubsub = redis.pubsub()
     await pubsub.subscribe(REDIS_ALERT_CHANNEL)
@@ -47,15 +48,12 @@ async def redis_listener():
         await pubsub.unsubscribe(REDIS_ALERT_CHANNEL)
         await redis.close()
 
-
 @router.websocket("/alerts")
 async def alert_status_websocket(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        # Just keep the connection open; messages come from Redis listener
         while True:
-            # We need to keep the connection alive; can also receive pings from client
-            await websocket.receive_text()
+            await websocket.receive_text()  # keep alive
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception:

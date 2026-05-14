@@ -14,6 +14,7 @@ MAX_RECONNECT_DELAY = 60
 class StreamManager:
     def __init__(self):
         self.readers: Dict[UUID, RTSPReader] = {}
+        self._shutdown = asyncio.Event()
 
     async def start_all_from_db(self):
         async with AsyncSessionLocal() as session:
@@ -26,7 +27,7 @@ class StreamManager:
 
     async def _connect_camera_with_retry(self, cam: Camera):
         delay = 1
-        while True:
+        while not self._shutdown.is_set():
             try:
                 reader = RTSPReader(cam.id, cam.rtsp_url)
                 await reader.start()
@@ -37,7 +38,11 @@ class StreamManager:
             except Exception as e:
                 logger.error(f"Camera {cam.id} connection failed: {e}. Retrying in {delay}s")
                 await self._update_health(cam.id, "error")
-                await asyncio.sleep(delay)
+                try:
+                    await asyncio.wait_for(self._shutdown.wait(), timeout=delay)
+                    return  # shutdown requested
+                except asyncio.TimeoutError:
+                    pass
                 delay = min(delay * 2, MAX_RECONNECT_DELAY)
 
     async def _update_health(self, camera_id: UUID, status: str):
@@ -62,6 +67,7 @@ class StreamManager:
         return reader
 
     async def stop_all(self):
+        self._shutdown.set()
         for reader in self.readers.values():
             await reader.stop()
 

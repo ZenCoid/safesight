@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import smtplib
 import json
@@ -11,73 +10,77 @@ from core.config import settings
 from core.database import AsyncSessionLocal
 from models.alert import Alert
 from twilio.rest import Client
+from celery.signals import task_failure
 
 app = celery_app
 logger = logging.getLogger(__name__)
 
 REDIS_ALERT_CHANNEL = "safesight:alerts:status"
 
+
+def _update_alert_status_sync(violation_event_id: str, channel: str, level: int, success: bool):
+    """Synchronous helper to update DB and publish to Redis."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    async def _async():
+        # Update the Alert record
+        try:
+            async with AsyncSessionLocal() as session:
+                from sqlalchemy import select
+                result = await session.execute(
+                    select(Alert).where(
+                        Alert.violation_event_id == UUID(violation_event_id),
+                        Alert.channel == channel,
+                        Alert.escalation_level == level
+                    ).order_by(Alert.created_at.desc()).limit(1)
+                )
+                alert = result.scalar_one_or_none()
+                if alert:
+                    alert.sent = success
+                    await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to update alert status: {e}")
+
+        # Publish to Redis for WebSocket broadcast
+        try:
+            r = redis.Redis.from_url(settings.REDIS_URL)
+            payload = json.dumps({
+                "violation_event_id": violation_event_id,
+                "channel": channel,
+                "escalation_level": level,
+                "success": success,
+            })
+            r.publish(REDIS_ALERT_CHANNEL, payload)
+        except Exception as e:
+            logger.error(f"Failed to publish alert status to Redis: {e}")
+
+    loop.run_until_complete(_async())
+
+
 @app.task(bind=True, max_retries=5, default_retry_delay=10)
 def send_alert(self, violation_event_id, channel, escalation_level):
-    """
-    Dispatch alert via the given channel and record the result.
-    Supported: whatsapp (Twilio template), email (SMTP).
-    """
-    success = False
+    """Dispatch alert via the given channel and record the result."""
     try:
         if channel == 'whatsapp':
             _send_whatsapp(violation_event_id, escalation_level)
         elif channel == 'email':
             _send_email(violation_event_id, escalation_level)
         else:
-            logger.info(
-                f"ALERT: {violation_event_id} level {escalation_level} "
-                f"via {channel} (not implemented)"
-            )
-        success = True
+            logger.info(f"ALERT: {violation_event_id} level {escalation_level} via {channel} (not implemented)")
+        _update_alert_status_sync(violation_event_id, channel, escalation_level, True)
         return f"Alert sent to {channel}"
     except Exception as exc:
         logger.error(f"Alert failed (attempt {self.request.retries+1}): {exc}")
+        # Only update DB on the final retry
+        if self.request.retries == self.max_retries - 1:
+            _update_alert_status_sync(violation_event_id, channel, escalation_level, False)
         countdown = 10 * (2 ** self.request.retries)
         raise self.retry(exc=exc, countdown=countdown)
-    finally:
-        # Update DB and notify UI in all cases (success or final failure)
-        asyncio.run(_post_alert_action(violation_event_id, channel, escalation_level, success))
-
-
-async def _post_alert_action(violation_event_id: str, channel: str, level: int, success: bool):
-    """Update Alert record and publish WebSocket notification."""
-    # 1. Update the Alert's sent flag
-    try:
-        async with AsyncSessionLocal() as session:
-            # Find the most recent Alert for this violation + channel + level
-            from sqlalchemy import select, update
-            result = await session.execute(
-                select(Alert).where(
-                    Alert.violation_event_id == UUID(violation_event_id),
-                    Alert.channel == channel,
-                    Alert.escalation_level == level
-                ).order_by(Alert.created_at.desc()).limit(1)
-            )
-            alert = result.scalar_one_or_none()
-            if alert:
-                alert.sent = success
-                await session.commit()
-    except Exception as e:
-        logger.error(f"Failed to update alert status: {e}")
-
-    # 2. Publish to Redis for the live UI
-    try:
-        r = redis.Redis.from_url(settings.REDIS_URL)
-        payload = json.dumps({
-            "violation_event_id": violation_event_id,
-            "channel": channel,
-            "escalation_level": level,
-            "success": success,
-        })
-        r.publish(REDIS_ALERT_CHANNEL, payload)
-    except Exception as e:
-        logger.error(f"Failed to publish alert status to Redis: {e}")
 
 
 def _send_whatsapp(violation_event_id, escalation_level):
@@ -121,9 +124,6 @@ def _send_email(violation_event_id, escalation_level):
         logger.error(f"Email send failed: {exc}")
         raise
 
-
-# Dead‑letter signal (unchanged)
-from celery.signals import task_failure
 
 @task_failure.connect(sender=send_alert)
 def alert_task_failure(sender, task_id, exception, args, kwargs, **extra):

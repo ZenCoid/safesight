@@ -12,3 +12,4 @@ torchvision==0.26.0
 pytz==2024.2
 python-dotenv==1.0.1
 twilio>=9.0.0
+python-multipart

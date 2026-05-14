@@ -63,7 +63,7 @@ async def _can_alert(cache_key: str) -> bool:
         return True
 
 # ------------------------------------------------------------------
-# Schemas
+# Schemas (query sanitizers kept)
 # ------------------------------------------------------------------
 class SearchRequest(BaseModel):
     query: str = Field(..., max_length=500)
@@ -238,7 +238,7 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         logger.error(f"❌ Failed to save ViolationEvent: {e}")
         return
 
-    # Sovereign Training Pool
+    # Sovereign Training Pool (unchanged)
     try:
         training_dir = Path(settings.TRAINING_POOL_DIR)
         training_dir.mkdir(parents=True, exist_ok=True)
@@ -286,9 +286,7 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         logger.error(f"❌ Escalation failed: {e}")
 
 
-# ------------------------------------------------------------------
-# Immediate Search
-# ------------------------------------------------------------------
+# Immediate Search endpoint
 @router.post("/search", response_model=SearchResponse)
 async def zero_shot_search(req: SearchRequest):
     if not req.minio_keys:
@@ -323,9 +321,7 @@ async def zero_shot_search(req: SearchRequest):
     )
 
 
-# ------------------------------------------------------------------
 # Pinned Search Management
-# ------------------------------------------------------------------
 pinned_searches: dict[str, dict] = {}
 
 @router.post("/pinned", response_model=PinnedSearchResponse)

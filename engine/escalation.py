@@ -8,7 +8,6 @@ import redis.asyncio as aioredis
 from sqlalchemy import select
 from models.violation import ViolationEvent
 from models.rule import Rule
-from models.alert import Alert
 from core.database import AsyncSessionLocal
 from core.config import settings
 from schemas.rule_schema import RuleDefinition
@@ -40,6 +39,21 @@ class EscalationState:
 
     async def handle_violation_end(self, event_id: UUID):
         r = await self._get_redis()
+        raw = await r.hget(REDIS_KEY, str(event_id))
+        if raw:
+            data = json.loads(raw)
+            rule_id = UUID(data["rule_id"])
+            async with AsyncSessionLocal() as session:
+                rule_result = await session.execute(
+                    select(Rule).where(Rule.id == rule_id)
+                )
+                rule_row = rule_result.scalar_one_or_none()
+                if rule_row:
+                    rule_def = RuleDefinition(**rule_row.definition)
+                    # Dispatch any remaining escalation levels
+                    last = data.get("last_level", 0)
+                    for idx in range(last + 1, len(rule_def.escalation_levels) + 1):
+                        await self._dispatch_level(event_id, rule_def, idx)
         await r.hdel(REDIS_KEY, str(event_id))
 
     async def tick(self):

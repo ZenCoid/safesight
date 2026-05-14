@@ -41,8 +41,15 @@ async def forensic_search(req: ForensicRequest):
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
-    objects = list(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True))
-    objects = sorted(objects, key=lambda o: o.last_modified, reverse=True)[:req.max_frames]
+    # Limit enumeration to avoid scanning entire bucket
+    max_list = 2000
+    objects = []
+    for idx, obj in enumerate(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True)):
+        objects.append(obj)
+        if idx >= max_list:
+            break
+    objects.sort(key=lambda o: o.last_modified, reverse=True)
+    objects = objects[:req.max_frames]
 
     results = []
     for obj in objects:
@@ -51,7 +58,7 @@ async def forensic_search(req: ForensicRequest):
             frame_bytes = resp.read()
             resp.close()
             resp.release_conn()
-        except Exception as e:
+        except Exception:
             continue
 
         image_hash = hashlib.sha256(frame_bytes).hexdigest()
