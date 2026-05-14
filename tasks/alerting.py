@@ -1,35 +1,86 @@
+import asyncio
 import logging
 import smtplib
 import json
 from email.message import EmailMessage
+from uuid import UUID
+
+import redis
 from core.celery_app import celery_app
 from core.config import settings
+from core.database import AsyncSessionLocal
+from models.alert import Alert
 from twilio.rest import Client
 
 app = celery_app
 logger = logging.getLogger(__name__)
 
+REDIS_ALERT_CHANNEL = "safesight:alerts:status"
 
-@app.task(bind=True, max_retries=3, default_retry_delay=60)
+@app.task(bind=True, max_retries=5, default_retry_delay=10)
 def send_alert(self, violation_event_id, channel, escalation_level):
     """
-    Dispatch alert via the given channel.
+    Dispatch alert via the given channel and record the result.
     Supported: whatsapp (Twilio template), email (SMTP).
     """
-    if channel == 'whatsapp':
-        _send_whatsapp(violation_event_id, escalation_level)
-    elif channel == 'email':
-        _send_email(violation_event_id, escalation_level)
-    else:
-        logger.info(
-            f"ALERT: {violation_event_id} level {escalation_level} "
-            f"via {channel} (not implemented)"
-        )
-    return f"Alert sent to {channel}"
+    success = False
+    try:
+        if channel == 'whatsapp':
+            _send_whatsapp(violation_event_id, escalation_level)
+        elif channel == 'email':
+            _send_email(violation_event_id, escalation_level)
+        else:
+            logger.info(
+                f"ALERT: {violation_event_id} level {escalation_level} "
+                f"via {channel} (not implemented)"
+            )
+        success = True
+        return f"Alert sent to {channel}"
+    except Exception as exc:
+        logger.error(f"Alert failed (attempt {self.request.retries+1}): {exc}")
+        countdown = 10 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=countdown)
+    finally:
+        # Update DB and notify UI in all cases (success or final failure)
+        asyncio.run(_post_alert_action(violation_event_id, channel, escalation_level, success))
+
+
+async def _post_alert_action(violation_event_id: str, channel: str, level: int, success: bool):
+    """Update Alert record and publish WebSocket notification."""
+    # 1. Update the Alert's sent flag
+    try:
+        async with AsyncSessionLocal() as session:
+            # Find the most recent Alert for this violation + channel + level
+            from sqlalchemy import select, update
+            result = await session.execute(
+                select(Alert).where(
+                    Alert.violation_event_id == UUID(violation_event_id),
+                    Alert.channel == channel,
+                    Alert.escalation_level == level
+                ).order_by(Alert.created_at.desc()).limit(1)
+            )
+            alert = result.scalar_one_or_none()
+            if alert:
+                alert.sent = success
+                await session.commit()
+    except Exception as e:
+        logger.error(f"Failed to update alert status: {e}")
+
+    # 2. Publish to Redis for the live UI
+    try:
+        r = redis.Redis.from_url(settings.REDIS_URL)
+        payload = json.dumps({
+            "violation_event_id": violation_event_id,
+            "channel": channel,
+            "escalation_level": level,
+            "success": success,
+        })
+        r.publish(REDIS_ALERT_CHANNEL, payload)
+    except Exception as e:
+        logger.error(f"Failed to publish alert status to Redis: {e}")
 
 
 def _send_whatsapp(violation_event_id, escalation_level):
-    """Send WhatsApp message using the pre‑approved Twilio Content Template."""
     try:
         client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
         message = client.messages.create(
@@ -44,10 +95,10 @@ def _send_whatsapp(violation_event_id, escalation_level):
         logger.info(f"WhatsApp template message sent: {message.sid}")
     except Exception as exc:
         logger.error(f"WhatsApp send failed: {exc}")
+        raise
 
 
 def _send_email(violation_event_id, escalation_level):
-    """Send email alert via SMTP."""
     try:
         msg = EmailMessage()
         msg.set_content(
@@ -68,3 +119,15 @@ def _send_email(violation_event_id, escalation_level):
         logger.info(f"Email sent to {settings.SMTP_TO}")
     except Exception as exc:
         logger.error(f"Email send failed: {exc}")
+        raise
+
+
+# Dead‑letter signal (unchanged)
+from celery.signals import task_failure
+
+@task_failure.connect(sender=send_alert)
+def alert_task_failure(sender, task_id, exception, args, kwargs, **extra):
+    logger.critical(
+        f"🔥 ALERT TASK FAILED PERMANENTLY – "
+        f"task_id={task_id}, args={args}, exception={exception}"
+    )

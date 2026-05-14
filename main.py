@@ -10,11 +10,15 @@ from core.stream_manager import stream_manager
 from engine.escalation import escalation_state
 from api.routes import cameras, rules, alerts, search, minio_upload, forensic
 from api.ws import live as live_ws
+from api.ws import alerts as alerts_ws
 from core.pinned_scheduler import pinned_search_loop
 from core.live_capture import live_capture_loop
+from core.config import settings
+from minio import Minio
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 app = FastAPI(title="SafeSight AI Platform")
 
@@ -22,7 +26,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -62,6 +66,43 @@ async def escalation_loop():
             logger.error(f"Escalation tick failed: {e}")
         await asyncio.sleep(10)
 
+async def ensure_timescale_retention():
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text(
+                "SELECT remove_retention_policy('violation_events', if_exists => true);"
+            ))
+            await session.execute(text(
+                "SELECT remove_compression_policy('violation_events', if_exists => true);"
+            ))
+            await session.execute(text(
+                "SELECT add_retention_policy('violation_events', INTERVAL '30 days');"
+            ))
+            await session.execute(text(
+                "ALTER TABLE violation_events SET (timescaledb.compress, timescaledb.compress_segmentby = 'camera_id');"
+            ))
+            await session.execute(text(
+                "SELECT add_compression_policy('violation_events', INTERVAL '7 days');"
+            ))
+            await session.commit()
+            logger.info("TimescaleDB retention & compression policies configured")
+    except Exception as e:
+        logger.error(f"TimescaleDB policy setup failed: {e}")
+
+async def ensure_minio_bucket():
+    try:
+        client = Minio(
+            settings.MINIO_ENDPOINT,
+            access_key=settings.MINIO_ACCESS_KEY,
+            secret_key=settings.MINIO_SECRET_KEY,
+            secure=False,
+        )
+        if not client.bucket_exists(settings.MINIO_BUCKET):
+            client.make_bucket(settings.MINIO_BUCKET)
+            logger.info(f"MinIO bucket '{settings.MINIO_BUCKET}' created")
+    except Exception as e:
+        logger.error(f"MinIO bucket check failed: {e}")
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
@@ -76,6 +117,10 @@ async def startup():
     asyncio.create_task(disk_monitor())
     asyncio.create_task(pinned_search_loop())
     asyncio.create_task(live_capture_loop())
+    asyncio.create_task(ensure_timescale_retention())
+    asyncio.create_task(ensure_minio_bucket())
+    # Start the Redis listener for alert status broadcasts
+    asyncio.create_task(alerts_ws.redis_listener())
 
 app.include_router(cameras.router, prefix="/cameras", tags=["cameras"])
 app.include_router(rules.router, prefix="/rules", tags=["rules"])
@@ -84,6 +129,7 @@ app.include_router(search.router, prefix="/v1", tags=["AI Search"])
 app.include_router(minio_upload.router, prefix="/minio", tags=["MinIO"])
 app.include_router(forensic.router, prefix="/v1", tags=["Forensic"])
 app.include_router(live_ws.router, prefix="/ws", tags=["live"])
+app.include_router(alerts_ws.router, prefix="/ws", tags=["alert-status"])
 
 if __name__ == "__main__":
     import uvicorn

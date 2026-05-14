@@ -4,6 +4,7 @@ import io
 import json
 import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Optional, List
 import numpy as np
@@ -12,7 +13,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from PIL import Image
 
 from core.config import settings
@@ -65,10 +66,21 @@ async def _can_alert(cache_key: str) -> bool:
 # Schemas
 # ------------------------------------------------------------------
 class SearchRequest(BaseModel):
-    query: str
+    query: str = Field(..., max_length=500)
     minio_keys: List[str]
     camera_id: Optional[str] = None
     rule_id: Optional[str] = None
+
+    @validator('query')
+    def sanitize_query(cls, v):
+        forbidden = ['__', 'exec(', 'import ', 'subprocess', 'os.', 'sys.']
+        lower = v.lower()
+        for token in forbidden:
+            if token in lower:
+                raise ValueError(f'Query contains forbidden pattern: {token}')
+        if not re.match(r'^[\w\s\-_.,!?\'\"@#$%^&*()+=:;<>\[\]{}|\\/~`]+$', v):
+            raise ValueError('Query contains invalid characters')
+        return v
 
 class SearchDetectionObject(BaseModel):
     class_name: str
@@ -83,12 +95,23 @@ class SearchResponse(BaseModel):
     rule_id: Optional[str] = None
 
 class PinnedSearchRequest(BaseModel):
-    query: str
+    query: str = Field(..., max_length=500)
     channel: str = "whatsapp"
     interval_frames: int = 10
     minio_keys: List[str]
     rule_id: Optional[str] = None
     camera_id: Optional[str] = None
+
+    @validator('query')
+    def sanitize_pinned_query(cls, v):
+        forbidden = ['__', 'exec(', 'import ', 'subprocess', 'os.', 'sys.']
+        lower = v.lower()
+        for token in forbidden:
+            if token in lower:
+                raise ValueError(f'Query contains forbidden pattern: {token}')
+        if not re.match(r'^[\w\s\-_.,!?\'\"@#$%^&*()+=:;<>\[\]{}|\\/~`]+$', v):
+            raise ValueError('Query contains invalid characters')
+        return v
 
 class PinnedSearchResponse(BaseModel):
     id: str

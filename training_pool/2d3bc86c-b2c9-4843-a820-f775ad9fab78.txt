@@ -1,0 +1,4 @@
+query: Is there a person holding a construction helmet?
+vlm_reasoning: person wearing construction attire holding a helmet
+confidence: 0.95
+image_hash: 

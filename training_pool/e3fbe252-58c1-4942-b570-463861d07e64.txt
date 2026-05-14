@@ -1,0 +1,6 @@
+query: Is there a person holding a construction helmet?
+
+
+vlm_reasoning: person holding construction helmet
+confidence: 0.95
+image_hash: 
