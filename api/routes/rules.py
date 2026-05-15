@@ -86,11 +86,13 @@ async def simulate_rule(rule_def: RuleDefinition):
         secure=False,
     )
 
-    # Get recent objects from the bucket
-    try:
-        objects = list(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True))
-    except Exception as e:
-        raise HTTPException(500, f"Failed to list MinIO objects: {e}")
+    # Limit listing to avoid scanning the entire bucket
+    max_list = 2000
+    objects = []
+    for idx, obj in enumerate(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True)):
+        objects.append(obj)
+        if idx >= max_list:
+            break
 
     if not objects:
         return {
@@ -108,12 +110,10 @@ async def simulate_rule(rule_def: RuleDefinition):
     alerts_fired = 0
 
     # For simulation, we generate random detections for each frame
-    # to mimic an object detector. Replace this with actual detector if available.
     random.seed(42)
     evaluator = RuleEvaluator(rule_def)
 
     for obj in objects:
-        # Generate 0‑3 random detected objects per frame
         num_detections = random.randint(0, 3)
         detection_objects = []
         for _ in range(num_detections):
@@ -125,7 +125,6 @@ async def simulate_rule(rule_def: RuleDefinition):
                 )
             )
 
-        # Build a simulated detection event
         det_event = DetectionEvent(
             camera_id=uuid4(),
             frame_id=random.randint(1, 1000),
@@ -134,7 +133,6 @@ async def simulate_rule(rule_def: RuleDefinition):
             raw_confidence_distribution={}
         )
 
-        # Evaluate the rule against this event
         try:
             if evaluator.evaluate(det_event):
                 alerts_fired += 1

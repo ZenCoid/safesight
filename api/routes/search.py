@@ -29,7 +29,8 @@ router = APIRouter()
 # ------------------------------------------------------------------
 # Lazy‑loaded VLM pipeline
 # ------------------------------------------------------------------
-MODEL_PATH = Path("E:/safesight/models/qwen-3b-int4-genai").resolve()
+# Use configurable model path (default "models/qwen-3b-int4")
+MODEL_PATH = Path(settings.MODEL_SEARCH_PATH).resolve()
 DEVICE = "CPU"
 
 _pipe = None

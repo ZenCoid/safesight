@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from api.routes.search import process_search, create_violation_and_escalate, pinned_searches
-from core.live_capture import latest_frame_per_camera
+from core.live_capture import latest_frame_per_camera, _frame_lock
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,9 @@ async def pinned_search_loop():
             keys = ps.get("minio_keys", [])
             camera_id = ps.get("camera_id")
             if not keys and camera_id:
-                latest = latest_frame_per_camera.get(camera_id)
+                # Thread‑safe read of latest frame
+                async with _frame_lock:
+                    latest = latest_frame_per_camera.get(camera_id)
                 if latest:
                     keys = [latest]
             if not keys:
