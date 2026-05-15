@@ -3,16 +3,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
 from uuid import UUID, uuid4
-import random
 import time
 import asyncio
 from minio import Minio
 from core.config import settings
 from models.rule import Rule
 from schemas.rule_schema import RuleDefinition
-from schemas.detection import DetectionEvent, DetectionObject
 from engine.rule_evaluator import RuleEvaluator
 from core.database import AsyncSessionLocal
+from ingestion.detector import RFDETRDetector
 
 import logging
 logger = logging.getLogger(__name__)
@@ -74,7 +73,7 @@ async def delete_rule(rule_id: UUID, db: AsyncSession = Depends(get_db)):
     return
 
 # ------------------------------------------------------------------
-# Rule Simulation – non‑blocking MinIO list
+# Rule Simulation – real detector on MinIO frames
 # ------------------------------------------------------------------
 @router.post("/simulate", summary="Simulate a rule against recent MinIO frames")
 async def simulate_rule(rule_def: RuleDefinition):
@@ -108,34 +107,33 @@ async def simulate_rule(rule_def: RuleDefinition):
     total_frames = len(objects)
     alerts_fired = 0
 
-    random.seed(42)
+    # Use the real RF‑DETR detector (stub returns empty detections for now)
+    detector = RFDETRDetector(settings.RFDETR_MODEL_PATH)
     evaluator = RuleEvaluator(rule_def)
 
     for obj in objects:
-        num_detections = random.randint(0, 3)
-        detection_objects = []
-        for _ in range(num_detections):
-            detection_objects.append(
-                DetectionObject(
-                    class_name=random.choice(["person", "helmet", "no-helmet", "fire"]),
-                    confidence=round(random.uniform(0.3, 0.99), 2),
-                    bbox=[round(random.uniform(0.0, 1.0), 2) for _ in range(4)]
-                )
+        try:
+            # Fetch frame bytes from MinIO (non‑blocking)
+            data = minio_client.get_object(settings.MINIO_BUCKET, obj.object_name)
+            frame_bytes = data.read()
+            data.close()
+            data.release_conn()
+
+            # Decode to OpenCV image
+            np_arr = np.frombuffer(frame_bytes, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+
+            # Run real detector (offloaded to thread)
+            det_event = await loop.run_in_executor(
+                None, detector.predict, frame, uuid4(), 1
             )
 
-        det_event = DetectionEvent(
-            camera_id=uuid4(),
-            frame_id=random.randint(1, 1000),
-            timestamp=time.time(),
-            objects=detection_objects,
-            raw_confidence_distribution={}
-        )
-
-        try:
             if evaluator.evaluate(det_event):
                 alerts_fired += 1
         except Exception as e:
-            logger.error(f"Rule evaluation error: {e}")
+            logger.error(f"Simulate frame evaluation error: {e}")
 
     density = alerts_fired / total_frames if total_frames > 0 else 0.0
 

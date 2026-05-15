@@ -8,7 +8,7 @@ from minio import Minio
 import redis.asyncio as aioredis
 from core.config import settings
 from core.stream_manager import stream_manager
-from tasks.privacy import redact_frame
+from tasks.privacy import apply_face_blur
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,6 @@ async def live_capture_loop():
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
-    # Offload blocking bucket existence check and creation
     if not await _run_blocking(minio_client.bucket_exists, settings.MINIO_BUCKET):
         await _run_blocking(minio_client.make_bucket, settings.MINIO_BUCKET)
 
@@ -60,18 +59,20 @@ async def live_capture_loop():
                     continue
 
                 _, jpeg_bytes = cv2.imencode('.jpg', frame)
-                frame_hash = hashlib.sha256(jpeg_bytes.tobytes()).hexdigest()
+                data_to_upload = jpeg_bytes.tobytes()
+
+                if privacy_on:
+                    # Blur faces BEFORE uploading – offloaded to thread
+                    data_to_upload = await asyncio.to_thread(apply_face_blur, data_to_upload)
+
+                frame_hash = hashlib.sha256(data_to_upload).hexdigest()
                 object_name = f"live/{camera_id}/{uuid4()}.jpg"
 
                 await _put_minio_object(minio_client, settings.MINIO_BUCKET, object_name,
-                                        jpeg_bytes.tobytes(), 'image/jpeg')
+                                        data_to_upload, 'image/jpeg')
 
                 async with _frame_lock:
                     latest_frame_per_camera[str(camera_id)] = object_name
-
-                if privacy_on:
-                    redact_frame.delay(object_name)
-                    logger.debug(f"Dispatched redaction for {object_name}")
 
                 logger.debug(f"Captured frame for camera {camera_id} -> {object_name}")
             except Exception as e:

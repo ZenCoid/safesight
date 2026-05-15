@@ -3,6 +3,7 @@ import json
 import time
 import logging
 import psutil
+import threading
 from typing import Dict, Set
 from uuid import UUID
 
@@ -56,7 +57,30 @@ manager = ConnectionManager()
 telemetry_manager = ConnectionManager()
 
 # --------------------------------------------------------------------------
-# Null-stream detector (real pipeline, empty predictions until model ready)
+# Global telemetry counters (simple thread‑safe increments)
+# --------------------------------------------------------------------------
+_hash_counter = 0
+_hash_lock = threading.Lock()
+_pseudo_labeling_active = False
+
+def increment_hash_count():
+    global _hash_counter
+    with _hash_lock:
+        _hash_counter += 1
+
+def get_and_reset_hash_count():
+    global _hash_counter
+    with _hash_lock:
+        val = _hash_counter
+        _hash_counter = 0
+    return val
+
+def set_pseudo_labeling_active(active: bool):
+    global _pseudo_labeling_active
+    _pseudo_labeling_active = active
+
+# --------------------------------------------------------------------------
+# Null‑stream detector (real pipeline)
 # --------------------------------------------------------------------------
 _detector = None
 
@@ -65,14 +89,13 @@ def get_detector():
     if _detector is None:
         try:
             _detector = RFDETRDetector(settings.RFDETR_MODEL_PATH)
-            logger.info("RF-DETR detector loaded (stub)")
+            logger.info("RF‑DETR detector loaded (stub)")
         except Exception as e:
             logger.error(f"Failed to load detector: {e}")
             _detector = None
     return _detector
 
 async def real_time_detection_stream(camera_id: str, reader):
-    """Loop that grabs frames, runs detector, broadcasts results."""
     detector = get_detector()
     if detector is None:
         logger.warning("No detector available – stream will not produce detections")
@@ -81,14 +104,12 @@ async def real_time_detection_stream(camera_id: str, reader):
     loop = asyncio.get_running_loop()
     frame_counter = 0
     async for _, frame in reader.get_frames():
-        # Stop if no subscribers
         active_subs = {cid for subs in manager.subscriptions.values() for cid in subs}
         if camera_id not in active_subs:
             break
         frame_counter += 1
         t_start = time.monotonic()
         try:
-            # Offload the synchronous predict to a thread
             det_event = await loop.run_in_executor(
                 None, detector.predict, frame, UUID(camera_id), frame_counter
             )
@@ -150,12 +171,14 @@ async def telemetry_websocket(websocket: WebSocket):
                 vlm_loaded = _pipe is not None
             except:
                 pass
+            hash_rate = get_and_reset_hash_count() / 2.0  # per second (update interval 2s)
             payload = {
                 "cpu_percent": cpu,
                 "memory_used_gb": round(mem.used / (1024**3), 2),
                 "detector_latency_ms": 0,
                 "vlm_loaded": vlm_loaded,
-                "pseudo_labeling_active": False,
+                "hash_gen_per_sec": round(hash_rate, 2),
+                "pseudo_labeling_active": _pseudo_labeling_active,
             }
             await websocket.send_json(payload)
             await asyncio.sleep(2)
