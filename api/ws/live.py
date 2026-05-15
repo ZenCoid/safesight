@@ -1,14 +1,27 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-import asyncio, json, random, time
+import asyncio
+import json
+import time
+import logging
+import psutil
 from typing import Dict, Set
 from uuid import UUID
 
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from core.config import settings
+from core.stream_manager import stream_manager
+from ingestion.detector import RFDETRDetector
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# --------------------------------------------------------------------------
+# Connection management
+# --------------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
-        self.subscriptions: Dict[str, Set[str]] = {}  # ws_id -> set of camera_ids
+        self.subscriptions: Dict[str, Set[str]] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -40,27 +53,65 @@ class ConnectionManager:
                     pass
 
 manager = ConnectionManager()
+telemetry_manager = ConnectionManager()
 
-async def mock_detection_stream(camera_id: str):
-    while True:
-        det = {
+# --------------------------------------------------------------------------
+# Null-stream detector (real pipeline, empty predictions until model ready)
+# --------------------------------------------------------------------------
+_detector = None
+
+def get_detector():
+    global _detector
+    if _detector is None:
+        try:
+            _detector = RFDETRDetector(settings.RFDETR_MODEL_PATH)
+            logger.info("RF-DETR detector loaded (stub)")
+        except Exception as e:
+            logger.error(f"Failed to load detector: {e}")
+            _detector = None
+    return _detector
+
+async def real_time_detection_stream(camera_id: str, reader):
+    """Loop that grabs frames, runs detector, broadcasts results."""
+    detector = get_detector()
+    if detector is None:
+        logger.warning("No detector available – stream will not produce detections")
+        return
+
+    frame_counter = 0
+    async for _, frame in reader.get_frames():
+        # Stop if no subscribers
+        active_subs = {cid for subs in manager.subscriptions.values() for cid in subs}
+        if camera_id not in active_subs:
+            break
+        frame_counter += 1
+        t_start = time.monotonic()
+        try:
+            det_event = detector.predict(frame, UUID(camera_id), frame_counter)
+        except Exception as e:
+            logger.error(f"Detector predict failed: {e}")
+            continue
+        latency_ms = (time.monotonic() - t_start) * 1000
+        payload = {
             "camera_id": camera_id,
-            "frame_id": random.randint(1000, 9999),
-            "timestamp": time.time(),
+            "frame_id": det_event.frame_id,
+            "timestamp": det_event.timestamp,
             "objects": [
                 {
-                    "class_name": random.choice(["person", "helmet", "no-helmet", "fire"]),
-                    "confidence": round(random.uniform(0.5, 0.99), 2),
-                    "bbox": [round(random.uniform(0.1, 0.9), 2) for _ in range(4)]
+                    "class_name": obj.class_name,
+                    "confidence": obj.confidence,
+                    "bbox": obj.bbox,
                 }
-                for _ in range(random.randint(1, 3))
-            ]
+                for obj in det_event.objects
+            ],
+            "latency_ms": round(latency_ms, 2),
         }
-        await manager.broadcast_to_camera(camera_id, det)
-        await asyncio.sleep(1)
+        await manager.broadcast_to_camera(camera_id, payload)
+        await asyncio.sleep(0.05)
 
-active_mock_streams: Dict[str, asyncio.Task] = {}
-
+# --------------------------------------------------------------------------
+# Overlay WebSocket
+# --------------------------------------------------------------------------
 @router.websocket("/overlay")
 async def live_overlay(websocket: WebSocket):
     await manager.connect(websocket)
@@ -71,21 +122,40 @@ async def live_overlay(websocket: WebSocket):
             cam_id = data.get("camera_id")
             if action == "subscribe" and cam_id:
                 manager.subscribe(websocket, cam_id)
-                if cam_id not in active_mock_streams:
-                    active_mock_streams[cam_id] = asyncio.create_task(mock_detection_stream(cam_id))
+                reader = stream_manager.readers.get(UUID(cam_id))
+                if reader:
+                    asyncio.create_task(real_time_detection_stream(cam_id, reader))
             elif action == "unsubscribe" and cam_id:
                 manager.unsubscribe(websocket, cam_id)
-                # If no more subscribers for this camera, cancel mock stream
-                remaining = any(cam_id in subs for subs in manager.subscriptions.values())
-                if not remaining and cam_id in active_mock_streams:
-                    task = active_mock_streams.pop(cam_id)
-                    task.cancel()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        # Clean up any dangling mock streams for this client
-        for cam_id in list(active_mock_streams.keys()):
-            remaining = any(cam_id in subs for subs in manager.subscriptions.values())
-            if not remaining:
-                task = active_mock_streams.pop(cam_id, None)
-                if task:
-                    task.cancel()
+
+# --------------------------------------------------------------------------
+# Telemetry WebSocket
+# --------------------------------------------------------------------------
+@router.websocket("/telemetry")
+async def telemetry_websocket(websocket: WebSocket):
+    await telemetry_manager.connect(websocket)
+    try:
+        while True:
+            cpu = psutil.cpu_percent()
+            mem = psutil.virtual_memory()
+            vlm_loaded = False
+            try:
+                from api.routes.search import _pipe
+                vlm_loaded = _pipe is not None
+            except:
+                pass
+            payload = {
+                "cpu_percent": cpu,
+                "memory_used_gb": round(mem.used / (1024**3), 2),
+                "detector_latency_ms": 0,
+                "vlm_loaded": vlm_loaded,
+                "pseudo_labeling_active": False,
+            }
+            await websocket.send_json(payload)
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        telemetry_manager.disconnect(websocket)
+    except Exception:
+        telemetry_manager.disconnect(websocket)

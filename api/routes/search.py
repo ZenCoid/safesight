@@ -26,10 +26,6 @@ from minio import Minio
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# ------------------------------------------------------------------
-# Lazy‑loaded VLM pipeline
-# ------------------------------------------------------------------
-# Use configurable model path (default "models/qwen-3b-int4")
 MODEL_PATH = Path(settings.MODEL_SEARCH_PATH).resolve()
 DEVICE = "CPU"
 
@@ -46,9 +42,6 @@ async def get_pipe():
             logger.info("✅ Pipeline loaded.")
     return _pipe
 
-# ------------------------------------------------------------------
-# Alert deduplication
-# ------------------------------------------------------------------
 _alert_cache: set[str] = set()
 _alert_lock = asyncio.Lock()
 ALERT_COOLDOWN_SECONDS = 120
@@ -63,9 +56,7 @@ async def _can_alert(cache_key: str) -> bool:
         loop.call_later(ALERT_COOLDOWN_SECONDS, lambda: _alert_cache.discard(cache_key))
         return True
 
-# ------------------------------------------------------------------
-# Schemas
-# ------------------------------------------------------------------
+# Schemas (same as before, omitted for brevity but unchanged)
 class SearchRequest(BaseModel):
     query: str = Field(..., max_length=500)
     minio_keys: List[str]
@@ -123,7 +114,7 @@ class PinnedSearchResponse(BaseModel):
     channel: str
 
 # ------------------------------------------------------------------
-# Core inference + auto‑escalation
+# Single frame processing (used for immediate search)
 # ------------------------------------------------------------------
 async def process_search(query: str, minio_key: str,
                          camera_id: Optional[str] = None,
@@ -202,7 +193,89 @@ async def process_search(query: str, minio_key: str,
 
     return {"present": present, "confidence": confidence, "description": description, "raw_answer": answer}
 
+# ------------------------------------------------------------------
+# Composite 2x2 video panel (always used for pinned searches)
+# ------------------------------------------------------------------
+async def process_composite_search(query: str, camera_id: str, channel: str = "whatsapp") -> dict:
+    pipe = await get_pipe()
+    minio_client = Minio(settings.MINIO_ENDPOINT,
+                         access_key=settings.MINIO_ACCESS_KEY,
+                         secret_key=settings.MINIO_SECRET_KEY,
+                         secure=False)
+    prefix = f"live/{camera_id}/"
+    objects = list(minio_client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True))
+    if len(objects) < 4:
+        latest = max(objects, key=lambda o: o.last_modified) if objects else None
+        if not latest:
+            return {"present": False, "confidence": 0.0, "description": "No frames available"}
+        resp = minio_client.get_object(settings.MINIO_BUCKET, latest.object_name)
+        frame_bytes = resp.read()
+        resp.close()
+        resp.release_conn()
+        image = Image.open(io.BytesIO(frame_bytes)).convert("RGB").resize((168, 168))
+    else:
+        objects.sort(key=lambda o: o.last_modified, reverse=True)
+        frames = []
+        for obj in objects[:4]:
+            resp = minio_client.get_object(settings.MINIO_BUCKET, obj.object_name)
+            fb = resp.read()
+            resp.close()
+            resp.release_conn()
+            im = Image.open(io.BytesIO(fb)).convert("RGB").resize((84, 84))
+            frames.append(im)
+        canvas = Image.new("RGB", (168, 168))
+        canvas.paste(frames[0], (0, 0))
+        canvas.paste(frames[1], (84, 0))
+        canvas.paste(frames[2], (0, 84))
+        canvas.paste(frames[3], (84, 84))
+        image = canvas
 
+    image_data = np.array(image).reshape(1, 168, 168, 3).astype(np.uint8)
+    image_tensor = ov.Tensor(image_data)
+
+    prompt = (
+        f"Question: {query}\n"
+        "You are an AI surveillance operator. Look at the image and answer with a JSON object.\n"
+        "Focus on Human‑Object Interactions: Violence (weapons, fighting), Property (theft, vandalism), "
+        "Public Safety (crowd, fire, accidents).\n"
+        "If the described event is present, set 'present' to true and 'description' to a precise summary.\n"
+        "If not, set 'present' to false and 'description' to what you actually see.\n"
+        'Format: {"present": true/false, "confidence": 0.0-1.0, "description": "short string"}'
+    )
+    result = pipe.generate(prompt, image=image_tensor, max_new_tokens=40)
+    answer = result.texts[0]
+
+    try:
+        parsed = json.loads(answer)
+    except:
+        present = "true" in answer.lower()
+        parsed = {"present": present, "confidence": 0.7 if present else 0.3, "description": answer}
+
+    present = parsed.get("present", False)
+    description = parsed.get("description", "")
+    confidence = parsed.get("confidence", 0.7)
+
+    if present and channel in ("whatsapp", "email"):
+        if await _can_alert(f"{query}::composite::{camera_id}"):
+            asyncio.create_task(
+                create_violation_and_escalate(
+                    query=query,
+                    minio_key=objects[0].object_name if objects else "composite",
+                    raw_answer=answer,
+                    confidence=confidence,
+                    description=description,
+                    camera_id=camera_id,
+                    rule_id=None,
+                    channel=channel,
+                    image_hash="",
+                )
+            )
+
+    return {"present": present, "confidence": confidence, "description": description, "raw_answer": answer}
+
+# ------------------------------------------------------------------
+# Violation creation (with privacy redact if enabled)
+# ------------------------------------------------------------------
 async def create_violation_and_escalate(query: str, minio_key: str,
                                          raw_answer: str, confidence: float,
                                          description: str,
@@ -240,7 +313,7 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         logger.error(f"❌ Failed to save ViolationEvent: {e}")
         return
 
-    # Sovereign Training Pool
+    # Sovereign Training Pool (with privacy check)
     try:
         training_dir = Path(settings.TRAINING_POOL_DIR)
         training_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +325,12 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         frame_bytes = resp.read()
         resp.close()
         resp.release_conn()
+        # Check privacy flag
+        from redis import Redis
+        r = Redis.from_url(settings.REDIS_URL)
+        if r.get("safesight:privacy:enabled") == b"1":
+            from tasks.privacy import apply_face_blur
+            frame_bytes = apply_face_blur(frame_bytes)
         img_path = training_dir / f"{event_id}.jpg"
         img_path.write_bytes(frame_bytes)
         label_path = training_dir / f"{event_id}.txt"
@@ -287,18 +366,15 @@ async def create_violation_and_escalate(query: str, minio_key: str,
     except Exception as e:
         logger.error(f"❌ Escalation failed: {e}")
 
-
 # ------------------------------------------------------------------
-# Immediate Search
+# Immediate Search endpoint
 # ------------------------------------------------------------------
 @router.post("/search", response_model=SearchResponse)
 async def zero_shot_search(req: SearchRequest):
     if not req.minio_keys:
         raise HTTPException(400, "At least one minio_key is required.")
-
     all_detections = []
     raw_answers = []
-
     for key in req.minio_keys:
         parsed = await process_search(
             query=req.query,
@@ -316,14 +392,12 @@ async def zero_shot_search(req: SearchRequest):
                     additional_info=parsed.get("description", ""),
                 )
             )
-
     return SearchResponse(
         detections=all_detections,
         raw_answer="\n".join(raw_answers),
         camera_id=req.camera_id,
         rule_id=req.rule_id,
     )
-
 
 # ------------------------------------------------------------------
 # Pinned Search Management
