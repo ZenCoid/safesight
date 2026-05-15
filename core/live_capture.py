@@ -28,10 +28,12 @@ async def _is_privacy_enabled() -> bool:
     val = await r.get("safesight:privacy:enabled")
     return val == b"1"
 
-async def _put_minio_object(client: Minio, bucket: str, name: str, data: bytes, content_type: str):
+async def _run_blocking(func, *args):
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
-        None,
+    return await loop.run_in_executor(None, func, *args)
+
+async def _put_minio_object(client: Minio, bucket: str, name: str, data: bytes, content_type: str):
+    await _run_blocking(
         lambda: client.put_object(bucket, name, io.BytesIO(data), len(data), content_type=content_type)
     )
 
@@ -42,8 +44,9 @@ async def live_capture_loop():
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
-    if not minio_client.bucket_exists(settings.MINIO_BUCKET):
-        minio_client.make_bucket(settings.MINIO_BUCKET)
+    # Offload blocking bucket existence check and creation
+    if not await _run_blocking(minio_client.bucket_exists, settings.MINIO_BUCKET):
+        await _run_blocking(minio_client.make_bucket, settings.MINIO_BUCKET)
 
     while True:
         privacy_on = await _is_privacy_enabled()
