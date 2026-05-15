@@ -75,5 +75,17 @@ async def live_overlay(websocket: WebSocket):
                     active_mock_streams[cam_id] = asyncio.create_task(mock_detection_stream(cam_id))
             elif action == "unsubscribe" and cam_id:
                 manager.unsubscribe(websocket, cam_id)
+                # If no more subscribers for this camera, cancel mock stream
+                remaining = any(cam_id in subs for subs in manager.subscriptions.values())
+                if not remaining and cam_id in active_mock_streams:
+                    task = active_mock_streams.pop(cam_id)
+                    task.cancel()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        # Clean up any dangling mock streams for this client
+        for cam_id in list(active_mock_streams.keys()):
+            remaining = any(cam_id in subs for subs in manager.subscriptions.values())
+            if not remaining:
+                task = active_mock_streams.pop(cam_id, None)
+                if task:
+                    task.cancel()

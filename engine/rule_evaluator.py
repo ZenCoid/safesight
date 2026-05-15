@@ -308,3 +308,7 @@ class RuleEvaluator:
         self._heartbeat_running = False
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=2)
+
+    def __del__(self):
+        """Clean up the heartbeat thread when the evaluator is garbage collected."""
+        self.stop_heartbeat()

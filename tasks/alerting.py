@@ -19,13 +19,9 @@ REDIS_ALERT_CHANNEL = "safesight:alerts:status"
 
 
 def _update_alert_status_sync(violation_event_id: str, channel: str, level: int, success: bool):
-    """Synchronous helper to update DB and publish to Redis."""
+    """Synchronous helper – uses the *existing* event loop of the Celery worker.
+    In modern Celery + redis, the worker already has an event loop running."""
     import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
 
     async def _async():
         # Update the Alert record
@@ -59,6 +55,8 @@ def _update_alert_status_sync(violation_event_id: str, channel: str, level: int,
         except Exception as e:
             logger.error(f"Failed to publish alert status to Redis: {e}")
 
+    # Use the existing loop (Celery worker already has one for async tasks)
+    loop = asyncio.get_event_loop()
     loop.run_until_complete(_async())
 
 
@@ -76,7 +74,6 @@ def send_alert(self, violation_event_id, channel, escalation_level):
         return f"Alert sent to {channel}"
     except Exception as exc:
         logger.error(f"Alert failed (attempt {self.request.retries+1}): {exc}")
-        # Only update DB on the final retry
         if self.request.retries == self.max_retries - 1:
             _update_alert_status_sync(violation_event_id, channel, escalation_level, False)
         countdown = 10 * (2 ** self.request.retries)

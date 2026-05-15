@@ -36,8 +36,8 @@ class Settings(BaseSettings):
     # Autonomous Live Capture
     LIVE_CAPTURE_INTERVAL_SECONDS: int = 10
 
-    # Sovereign Training Pool
-    TRAINING_POOL_DIR: str = "E:/safesight/training_pool"
+    # Sovereign Training Pool (relative to project root, or set via env)
+    TRAINING_POOL_DIR: str = "./training_pool"
 
     class Config:
         env_file = ".env"

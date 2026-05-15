@@ -10,7 +10,9 @@ from core.stream_manager import stream_manager
 
 logger = logging.getLogger(__name__)
 
+# Module‑level dict and lock for thread‑safe access
 latest_frame_per_camera: dict[str, str] = {}
+_frame_lock = asyncio.Lock()
 
 async def live_capture_loop():
     minio_client = Minio(
@@ -43,7 +45,10 @@ async def live_capture_loop():
                     length=len(jpeg_bytes.tobytes()),
                     content_type='image/jpeg',
                 )
-                latest_frame_per_camera[str(camera_id)] = object_name
+
+                # Update the latest frame reference under a lock
+                async with _frame_lock:
+                    latest_frame_per_camera[str(camera_id)] = object_name
                 logger.debug(f"Captured frame for camera {camera_id} -> {object_name}")
             except Exception as e:
                 logger.error(f"Live capture failed for camera {camera_id}: {e}")
