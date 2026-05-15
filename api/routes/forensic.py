@@ -102,7 +102,7 @@ async def forensic_search(req: ForensicRequest):
         if not parsed.get("present", False) and not req.show_all:
             continue
 
-        # Non‑blocking presigned URL
+        # Non‑blocking presigned URL generation
         try:
             thumb_url = await loop.run_in_executor(
                 None, minio_client.presigned_get_object, settings.MINIO_BUCKET, obj.object_name
