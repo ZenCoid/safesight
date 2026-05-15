@@ -5,6 +5,8 @@ from typing import List
 from uuid import UUID, uuid4
 import time
 import asyncio
+import cv2
+import numpy as np
 from minio import Minio
 from core.config import settings
 from models.rule import Rule
@@ -130,7 +132,8 @@ async def simulate_rule(rule_def: RuleDefinition):
                 None, detector.predict, frame, uuid4(), 1
             )
 
-            if evaluator.evaluate(det_event):
+            # Await the async evaluator
+            if await evaluator.evaluate(det_event):
                 alerts_fired += 1
         except Exception as e:
             logger.error(f"Simulate frame evaluation error: {e}")

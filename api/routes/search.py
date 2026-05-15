@@ -22,6 +22,7 @@ from models.violation import ViolationEvent
 from engine.escalation import escalation_state
 from schemas.rule_schema import RuleDefinition
 from minio import Minio
+from api.ws.live import increment_hash_count
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -161,6 +162,7 @@ async def process_search(query: str, minio_key: str,
         return {"present": False, "confidence": 0.0, "description": str(e), "raw_answer": ""}
 
     image_hash = hashlib.sha256(frame_bytes).hexdigest()
+    increment_hash_count()
 
     image = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
     image_resized = image.resize((168, 168))
@@ -237,6 +239,9 @@ async def process_composite_search(query: str, camera_id: str, channel: str = "w
             return {"present": False, "confidence": 0.0, "description": "No frames available"}
         frame_bytes = await _get_minio_object(minio_client, settings.MINIO_BUCKET, latest.object_name)
         image = Image.open(io.BytesIO(frame_bytes)).convert("RGB").resize((168, 168))
+        # No hash count for single frame fallback? We'll count it for consistency.
+        _ = hashlib.sha256(frame_bytes).hexdigest()
+        increment_hash_count()
     else:
         objects.sort(key=lambda o: o.last_modified, reverse=True)
         frames = []
@@ -250,6 +255,10 @@ async def process_composite_search(query: str, camera_id: str, channel: str = "w
         canvas.paste(frames[2], (0, 84))
         canvas.paste(frames[3], (84, 84))
         image = canvas
+        # Compute hash for telemetry
+        composite_bytes = canvas.tobytes()
+        _ = hashlib.sha256(composite_bytes).hexdigest()
+        increment_hash_count()
 
     image_data = np.array(image).reshape(1, 168, 168, 3).astype(np.uint8)
     image_tensor = ov.Tensor(image_data)

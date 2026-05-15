@@ -9,6 +9,7 @@ import redis.asyncio as aioredis
 from core.config import settings
 from core.stream_manager import stream_manager
 from tasks.privacy import apply_face_blur
+from api.ws.live import increment_hash_count
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ async def live_capture_loop():
                     data_to_upload = await asyncio.to_thread(apply_face_blur, data_to_upload)
 
                 frame_hash = hashlib.sha256(data_to_upload).hexdigest()
+                increment_hash_count()
+
                 object_name = f"live/{camera_id}/{uuid4()}.jpg"
 
                 await _put_minio_object(minio_client, settings.MINIO_BUCKET, object_name,

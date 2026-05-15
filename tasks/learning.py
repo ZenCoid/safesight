@@ -4,6 +4,7 @@ from minio import Minio
 from core.config import settings
 from core.celery_app import celery_app
 from ingestion.detector import RFDETRDetector
+from api.ws.live import set_pseudo_labeling_active
 
 minio_client = Minio(
     settings.MINIO_ENDPOINT,
@@ -14,10 +15,11 @@ minio_client = Minio(
 
 @celery_app.task
 def pseudo_label_low_confidence_frames():
-    """
-    Fetch low-confidence frames from MinIO, run teacher model, and produce labels.
-    """
-    # Placeholder: actual implementation depends on data pipeline
-    objects = minio_client.list_objects(settings.MINIO_BUCKET, prefix="low-conf/")
-    # ... labeling logic
-    return f"Processed {len(list(objects))} frames"
+    set_pseudo_labeling_active(True)
+    try:
+        # Placeholder: actual implementation depends on data pipeline
+        objects = minio_client.list_objects(settings.MINIO_BUCKET, prefix="low-conf/")
+        # ... labeling logic
+        return f"Processed {len(list(objects))} frames"
+    finally:
+        set_pseudo_labeling_active(False)

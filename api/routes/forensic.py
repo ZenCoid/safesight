@@ -12,7 +12,8 @@ from PIL import Image
 import numpy as np
 import openvino as ov
 from api.routes.search import get_pipe, _get_minio_object
-from api.ws.live import increment_hash_count   # new import
+from api.ws.live import increment_hash_count
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
