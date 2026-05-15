@@ -78,6 +78,7 @@ async def real_time_detection_stream(camera_id: str, reader):
         logger.warning("No detector available – stream will not produce detections")
         return
 
+    loop = asyncio.get_running_loop()
     frame_counter = 0
     async for _, frame in reader.get_frames():
         # Stop if no subscribers
@@ -87,7 +88,10 @@ async def real_time_detection_stream(camera_id: str, reader):
         frame_counter += 1
         t_start = time.monotonic()
         try:
-            det_event = detector.predict(frame, UUID(camera_id), frame_counter)
+            # Offload the synchronous predict to a thread
+            det_event = await loop.run_in_executor(
+                None, detector.predict, frame, UUID(camera_id), frame_counter
+            )
         except Exception as e:
             logger.error(f"Detector predict failed: {e}")
             continue

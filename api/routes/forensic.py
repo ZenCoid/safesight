@@ -55,6 +55,7 @@ async def forensic_search(req: ForensicRequest):
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
+    # Non‑blocking list_objects
     loop = asyncio.get_running_loop()
     max_list = 2000
     objects = []

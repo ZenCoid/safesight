@@ -128,7 +128,7 @@ class PinnedSearchResponse(BaseModel):
     channel: str
 
 # ------------------------------------------------------------------
-# Helper – offload blocking MinIO call to thread pool
+# Non‑blocking MinIO helper (exported for forensic.py)
 # ------------------------------------------------------------------
 async def _get_minio_object(client: Minio, bucket: str, key: str) -> bytes:
     loop = asyncio.get_running_loop()

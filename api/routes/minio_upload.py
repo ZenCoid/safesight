@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 from fastapi import APIRouter, UploadFile, File, HTTPException
@@ -5,6 +6,10 @@ from minio import Minio
 from core.config import settings
 
 router = APIRouter()
+
+async def _run_blocking(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, func, *args)
 
 @router.post("/upload")
 async def upload_image(file: UploadFile = File(...)):
@@ -19,8 +24,9 @@ async def upload_image(file: UploadFile = File(...)):
         secure=False,
     )
 
-    if not minio_client.bucket_exists(settings.MINIO_BUCKET):
-        minio_client.make_bucket(settings.MINIO_BUCKET)
+    # Ensure bucket exists (blocking call offloaded)
+    if not await _run_blocking(minio_client.bucket_exists, settings.MINIO_BUCKET):
+        await _run_blocking(minio_client.make_bucket, settings.MINIO_BUCKET)
 
     file_bytes = await file.read()
     file_hash = hashlib.sha256(file_bytes).hexdigest()
@@ -29,19 +35,18 @@ async def upload_image(file: UploadFile = File(...)):
     object_name = f"uploaded/{file_hash}.{ext}"
 
     try:
-        minio_client.stat_object(settings.MINIO_BUCKET, object_name)
+        await _run_blocking(minio_client.stat_object, settings.MINIO_BUCKET, object_name)
         return {"object_name": object_name, "already_exists": True}
     except Exception:
         pass
 
     try:
-        minio_client.put_object(
+        await _run_blocking(
+            minio_client.put_object,
             settings.MINIO_BUCKET,
             object_name,
             io.BytesIO(file_bytes),
-            length=len(file_bytes),
-            part_size=10 * 1024 * 1024,
-            content_type=file.content_type,
+            len(file_bytes),
         )
     except Exception as e:
         raise HTTPException(500, f"MinIO upload failed: {e}")
