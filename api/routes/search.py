@@ -3,7 +3,6 @@ import logging
 import io
 import json
 import hashlib
-import os
 import re
 from pathlib import Path
 from typing import Optional, List
@@ -15,6 +14,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from PIL import Image
+import redis.asyncio as aioredis
 
 from core.config import settings
 from core.database import AsyncSessionLocal
@@ -56,7 +56,21 @@ async def _can_alert(cache_key: str) -> bool:
         loop.call_later(ALERT_COOLDOWN_SECONDS, lambda: _alert_cache.discard(cache_key))
         return True
 
-# Schemas (same as before, omitted for brevity but unchanged)
+_redis_client = None
+
+async def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
+    return _redis_client
+
+async def _is_privacy_enabled() -> bool:
+    r = await _get_redis()
+    return await r.get("safesight:privacy:enabled") == b"1"
+
+# ------------------------------------------------------------------
+# Schemas
+# ------------------------------------------------------------------
 class SearchRequest(BaseModel):
     query: str = Field(..., max_length=500)
     minio_keys: List[str]
@@ -114,7 +128,7 @@ class PinnedSearchResponse(BaseModel):
     channel: str
 
 # ------------------------------------------------------------------
-# Single frame processing (used for immediate search)
+# Single frame processing
 # ------------------------------------------------------------------
 async def process_search(query: str, minio_key: str,
                          camera_id: Optional[str] = None,
@@ -194,7 +208,7 @@ async def process_search(query: str, minio_key: str,
     return {"present": present, "confidence": confidence, "description": description, "raw_answer": answer}
 
 # ------------------------------------------------------------------
-# Composite 2x2 video panel (always used for pinned searches)
+# Composite 2x2 video panel (used for pinned searches)
 # ------------------------------------------------------------------
 async def process_composite_search(query: str, camera_id: str, channel: str = "whatsapp") -> dict:
     pipe = await get_pipe()
@@ -203,7 +217,10 @@ async def process_composite_search(query: str, camera_id: str, channel: str = "w
                          secret_key=settings.MINIO_SECRET_KEY,
                          secure=False)
     prefix = f"live/{camera_id}/"
-    objects = list(minio_client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True))
+    loop = asyncio.get_running_loop()
+    objects = await loop.run_in_executor(
+        None, lambda: list(minio_client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True))
+    )
     if len(objects) < 4:
         latest = max(objects, key=lambda o: o.last_modified) if objects else None
         if not latest:
@@ -325,12 +342,12 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         frame_bytes = resp.read()
         resp.close()
         resp.release_conn()
-        # Check privacy flag
-        from redis import Redis
-        r = Redis.from_url(settings.REDIS_URL)
-        if r.get("safesight:privacy:enabled") == b"1":
+
+        # Non‑blocking face blur if privacy is enabled
+        if await _is_privacy_enabled():
             from tasks.privacy import apply_face_blur
-            frame_bytes = apply_face_blur(frame_bytes)
+            frame_bytes = await asyncio.to_thread(apply_face_blur, frame_bytes)
+
         img_path = training_dir / f"{event_id}.jpg"
         img_path.write_bytes(frame_bytes)
         label_path = training_dir / f"{event_id}.txt"
@@ -367,7 +384,7 @@ async def create_violation_and_escalate(query: str, minio_key: str,
         logger.error(f"❌ Escalation failed: {e}")
 
 # ------------------------------------------------------------------
-# Immediate Search endpoint
+# Immediate Search
 # ------------------------------------------------------------------
 @router.post("/search", response_model=SearchResponse)
 async def zero_shot_search(req: SearchRequest):

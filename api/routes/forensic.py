@@ -3,6 +3,7 @@ import json
 import logging
 import hashlib
 import re
+import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from typing import List
@@ -54,10 +55,13 @@ async def forensic_search(req: ForensicRequest):
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
-    # Limit enumeration to avoid scanning entire bucket
+    # Non‑blocking list_objects
+    loop = asyncio.get_running_loop()
     max_list = 2000
     objects = []
-    for idx, obj in enumerate(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True)):
+    for idx, obj in enumerate(await loop.run_in_executor(
+        None, lambda: list(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True))
+    )):
         objects.append(obj)
         if idx >= max_list:
             break

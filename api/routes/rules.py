@@ -5,6 +5,7 @@ from typing import List
 from uuid import UUID, uuid4
 import random
 import time
+import asyncio
 from minio import Minio
 from core.config import settings
 from models.rule import Rule
@@ -73,23 +74,22 @@ async def delete_rule(rule_id: UUID, db: AsyncSession = Depends(get_db)):
     return
 
 # ------------------------------------------------------------------
-# Rule Simulation – evaluate a proposed rule against recent frames
+# Rule Simulation – non‑blocking MinIO list
 # ------------------------------------------------------------------
 @router.post("/simulate", summary="Simulate a rule against recent MinIO frames")
 async def simulate_rule(rule_def: RuleDefinition):
-    """Evaluate the proposed rule on up to 50 recent frames stored in MinIO,
-    simulating detection events and returning predicted alert density."""
     minio_client = Minio(
         settings.MINIO_ENDPOINT,
         access_key=settings.MINIO_ACCESS_KEY,
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
-
-    # Limit listing to avoid scanning the entire bucket
+    loop = asyncio.get_running_loop()
     max_list = 2000
     objects = []
-    for idx, obj in enumerate(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True)):
+    for idx, obj in enumerate(await loop.run_in_executor(
+        None, lambda: list(minio_client.list_objects(settings.MINIO_BUCKET, recursive=True))
+    )):
         objects.append(obj)
         if idx >= max_list:
             break
@@ -102,14 +102,12 @@ async def simulate_rule(rule_def: RuleDefinition):
             "message": "No frames found in MinIO warehouse."
         }
 
-    # Sort by last_modified descending, take up to 50
     objects.sort(key=lambda o: o.last_modified, reverse=True)
     objects = objects[:50]
 
     total_frames = len(objects)
     alerts_fired = 0
 
-    # For simulation, we generate random detections for each frame
     random.seed(42)
     evaluator = RuleEvaluator(rule_def)
 
