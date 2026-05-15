@@ -13,7 +13,7 @@ import numpy as np
 import openvino as ov
 
 from core.config import settings
-from api.routes.search import get_pipe
+from api.routes.search import get_pipe, _get_minio_object
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -55,7 +55,6 @@ async def forensic_search(req: ForensicRequest):
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
-    # Non‑blocking list_objects
     loop = asyncio.get_running_loop()
     max_list = 2000
     objects = []
@@ -71,10 +70,7 @@ async def forensic_search(req: ForensicRequest):
     results = []
     for obj in objects:
         try:
-            resp = minio_client.get_object(settings.MINIO_BUCKET, obj.object_name)
-            frame_bytes = resp.read()
-            resp.close()
-            resp.release_conn()
+            frame_bytes = await _get_minio_object(minio_client, settings.MINIO_BUCKET, obj.object_name)
         except Exception:
             continue
 

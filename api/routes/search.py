@@ -128,6 +128,19 @@ class PinnedSearchResponse(BaseModel):
     channel: str
 
 # ------------------------------------------------------------------
+# Helper – offload blocking MinIO call to thread pool
+# ------------------------------------------------------------------
+async def _get_minio_object(client: Minio, bucket: str, key: str) -> bytes:
+    loop = asyncio.get_running_loop()
+    def _get():
+        resp = client.get_object(bucket, key)
+        data = resp.read()
+        resp.close()
+        resp.release_conn()
+        return data
+    return await loop.run_in_executor(None, _get)
+
+# ------------------------------------------------------------------
 # Single frame processing
 # ------------------------------------------------------------------
 async def process_search(query: str, minio_key: str,
@@ -142,10 +155,7 @@ async def process_search(query: str, minio_key: str,
                          secure=False)
 
     try:
-        resp = minio_client.get_object(settings.MINIO_BUCKET, minio_key)
-        frame_bytes = resp.read()
-        resp.close()
-        resp.release_conn()
+        frame_bytes = await _get_minio_object(minio_client, settings.MINIO_BUCKET, minio_key)
     except Exception as e:
         logger.error(f"Failed to fetch {minio_key}: {e}")
         return {"present": False, "confidence": 0.0, "description": str(e), "raw_answer": ""}
@@ -225,19 +235,13 @@ async def process_composite_search(query: str, camera_id: str, channel: str = "w
         latest = max(objects, key=lambda o: o.last_modified) if objects else None
         if not latest:
             return {"present": False, "confidence": 0.0, "description": "No frames available"}
-        resp = minio_client.get_object(settings.MINIO_BUCKET, latest.object_name)
-        frame_bytes = resp.read()
-        resp.close()
-        resp.release_conn()
+        frame_bytes = await _get_minio_object(minio_client, settings.MINIO_BUCKET, latest.object_name)
         image = Image.open(io.BytesIO(frame_bytes)).convert("RGB").resize((168, 168))
     else:
         objects.sort(key=lambda o: o.last_modified, reverse=True)
         frames = []
         for obj in objects[:4]:
-            resp = minio_client.get_object(settings.MINIO_BUCKET, obj.object_name)
-            fb = resp.read()
-            resp.close()
-            resp.release_conn()
+            fb = await _get_minio_object(minio_client, settings.MINIO_BUCKET, obj.object_name)
             im = Image.open(io.BytesIO(fb)).convert("RGB").resize((84, 84))
             frames.append(im)
         canvas = Image.new("RGB", (168, 168))
@@ -338,10 +342,7 @@ async def create_violation_and_escalate(query: str, minio_key: str,
                              access_key=settings.MINIO_ACCESS_KEY,
                              secret_key=settings.MINIO_SECRET_KEY,
                              secure=False)
-        resp = minio_client.get_object(settings.MINIO_BUCKET, minio_key)
-        frame_bytes = resp.read()
-        resp.close()
-        resp.release_conn()
+        frame_bytes = await _get_minio_object(minio_client, settings.MINIO_BUCKET, minio_key)
 
         # Non‑blocking face blur if privacy is enabled
         if await _is_privacy_enabled():

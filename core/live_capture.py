@@ -28,6 +28,13 @@ async def _is_privacy_enabled() -> bool:
     val = await r.get("safesight:privacy:enabled")
     return val == b"1"
 
+async def _put_minio_object(client: Minio, bucket: str, name: str, data: bytes, content_type: str):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: client.put_object(bucket, name, io.BytesIO(data), len(data), content_type=content_type)
+    )
+
 async def live_capture_loop():
     minio_client = Minio(
         settings.MINIO_ENDPOINT,
@@ -53,18 +60,12 @@ async def live_capture_loop():
                 frame_hash = hashlib.sha256(jpeg_bytes.tobytes()).hexdigest()
                 object_name = f"live/{camera_id}/{uuid4()}.jpg"
 
-                minio_client.put_object(
-                    settings.MINIO_BUCKET,
-                    object_name,
-                    io.BytesIO(jpeg_bytes.tobytes()),
-                    length=len(jpeg_bytes.tobytes()),
-                    content_type='image/jpeg',
-                )
+                await _put_minio_object(minio_client, settings.MINIO_BUCKET, object_name,
+                                        jpeg_bytes.tobytes(), 'image/jpeg')
 
                 async with _frame_lock:
                     latest_frame_per_camera[str(camera_id)] = object_name
 
-                # Trigger background face redaction if privacy is enabled
                 if privacy_on:
                     redact_frame.delay(object_name)
                     logger.debug(f"Dispatched redaction for {object_name}")
