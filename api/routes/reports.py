@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Optional
 from sqlalchemy import select, and_
 from models.violation import ViolationEvent
 from core.database import AsyncSessionLocal
-import json
+import uuid
 
 router = APIRouter()
 
@@ -15,16 +15,20 @@ async def compliance_report(
     camera_id: Optional[str] = None,
     rule_id: Optional[str] = None
 ):
-    """
-    Generate a compliance report listing all ViolationEvents within the given time range.
-    Each entry includes the SHA‑256 image hash and VLM reasoning for tamper‑proof chain of custody.
-    """
     async with AsyncSessionLocal() as session:
         conditions = [ViolationEvent.time >= start_time, ViolationEvent.time <= end_time]
         if camera_id:
-            conditions.append(ViolationEvent.camera_id == camera_id)
+            try:
+                cam_uuid = uuid.UUID(camera_id)
+                conditions.append(ViolationEvent.camera_id == cam_uuid)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="camera_id must be a valid UUID")
         if rule_id:
-            conditions.append(ViolationEvent.rule_id == rule_id)
+            try:
+                rule_uuid = uuid.UUID(rule_id)
+                conditions.append(ViolationEvent.rule_id == rule_uuid)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="rule_id must be a valid UUID")
 
         stmt = select(ViolationEvent).where(and_(*conditions)).order_by(ViolationEvent.time)
         result = await session.execute(stmt)
@@ -45,7 +49,7 @@ async def compliance_report(
                     "vlm_reasoning": snapshot.get("description", ""),
                     "vlm_model": snapshot.get("vlm_model", "unknown"),
                     "confidence": snapshot.get("confidence", 0.0),
-                    "snapshot": snapshot   # full detection snapshot for audit
+                    "snapshot": snapshot
                 }
             }
             report_entries.append(entry)

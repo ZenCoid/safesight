@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
 from uuid import UUID, uuid4
-import time
 import asyncio
 import cv2
 import numpy as np
@@ -116,7 +115,6 @@ async def simulate_rule(rule_def: RuleDefinition):
 
     for frame_idx, obj in enumerate(objects):
         try:
-            # Fetch frame bytes from MinIO (non‑blocking)
             data = minio_client.get_object(settings.MINIO_BUCKET, obj.object_name)
             frame_bytes = data.read()
             data.close()
@@ -133,7 +131,6 @@ async def simulate_rule(rule_def: RuleDefinition):
 
             if await evaluator.evaluate(det_event):
                 alerts_fired += 1
-                # Find the max confidence among objects matching the rule's modules
                 modules_lower = [m.lower() for m in rule_def.detection_modules]
                 max_conf = 0.0
                 for d_obj in det_event.objects:
