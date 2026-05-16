@@ -75,7 +75,7 @@ async def delete_rule(rule_id: UUID, db: AsyncSession = Depends(get_db)):
     return
 
 # ------------------------------------------------------------------
-# Rule Simulation – real detector on MinIO frames
+# Rule Simulation – real detector on MinIO frames + heatmap data
 # ------------------------------------------------------------------
 @router.post("/simulate", summary="Simulate a rule against recent MinIO frames")
 async def simulate_rule(rule_def: RuleDefinition):
@@ -100,6 +100,7 @@ async def simulate_rule(rule_def: RuleDefinition):
             "total_frames": 0,
             "alerts_fired": 0,
             "predicted_alert_density": 0.0,
+            "alert_frames": [],
             "message": "No frames found in MinIO warehouse."
         }
 
@@ -108,12 +109,12 @@ async def simulate_rule(rule_def: RuleDefinition):
 
     total_frames = len(objects)
     alerts_fired = 0
+    alert_frames = []  # list of dicts: {frame_index, timestamp, confidence}
 
-    # Use the real RF‑DETR detector (stub returns empty detections for now)
     detector = RFDETRDetector(settings.RFDETR_MODEL_PATH)
     evaluator = RuleEvaluator(rule_def)
 
-    for obj in objects:
+    for frame_idx, obj in enumerate(objects):
         try:
             # Fetch frame bytes from MinIO (non‑blocking)
             data = minio_client.get_object(settings.MINIO_BUCKET, obj.object_name)
@@ -121,20 +122,29 @@ async def simulate_rule(rule_def: RuleDefinition):
             data.close()
             data.release_conn()
 
-            # Decode to OpenCV image
             np_arr = np.frombuffer(frame_bytes, np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if frame is None:
                 continue
 
-            # Run real detector (offloaded to thread)
             det_event = await loop.run_in_executor(
                 None, detector.predict, frame, uuid4(), 1
             )
 
-            # Await the async evaluator
             if await evaluator.evaluate(det_event):
                 alerts_fired += 1
+                # Find the max confidence among objects matching the rule's modules
+                modules_lower = [m.lower() for m in rule_def.detection_modules]
+                max_conf = 0.0
+                for d_obj in det_event.objects:
+                    if d_obj.class_name.lower() in modules_lower:
+                        if d_obj.confidence > max_conf:
+                            max_conf = d_obj.confidence
+                alert_frames.append({
+                    "frame_index": frame_idx,
+                    "timestamp": obj.last_modified.isoformat(),
+                    "confidence": max_conf
+                })
         except Exception as e:
             logger.error(f"Simulate frame evaluation error: {e}")
 
@@ -144,4 +154,5 @@ async def simulate_rule(rule_def: RuleDefinition):
         "total_frames": total_frames,
         "alerts_fired": alerts_fired,
         "predicted_alert_density": density,
+        "alert_frames": alert_frames
     }
