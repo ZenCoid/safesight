@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.database import engine, Base, AsyncSessionLocal
 from core.stream_manager import stream_manager
 from engine.escalation import escalation_state
-from api.routes import cameras, rules, alerts, search, minio_upload, forensic, privacy
+from api.routes import cameras, rules, alerts, search, minio_upload, forensic, privacy, reports
 from api.ws import live as live_ws
 from api.ws import alerts as alerts_ws
 from core.pinned_scheduler import pinned_search_loop
@@ -140,6 +140,7 @@ app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 app.include_router(search.router, prefix="/v1", tags=["AI Search"])
 app.include_router(minio_upload.router, prefix="/minio", tags=["MinIO"])
 app.include_router(forensic.router, prefix="/v1", tags=["Forensic"])
+app.include_router(reports.router, tags=["reports"])
 app.include_router(live_ws.router, prefix="/ws", tags=["live"])
 app.include_router(alerts_ws.router, prefix="/ws", tags=["alert-status"])
 app.include_router(privacy.router, tags=["privacy"])

@@ -7,6 +7,7 @@ SafeSight Rule Evaluator – Neuro‑Symbolic Reasoning Engine
 - Disk guard halts evaluation when /kaggle/tmp is full
 - Heartbeat thread prevents deadlocks
 - Async trigger of Celery alerting tasks on confirmed violations
+- Cross‑camera arming via nervous system
 """
 
 import asyncio
@@ -28,6 +29,7 @@ from core.celery_app import celery_app
 from core.database import AsyncSessionLocal
 from models.violation import ViolationEvent
 from models.rule import Rule
+from engine.nervous_system import get_armed_threshold, get_global_armed_threshold, process_cross_camera_links
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +102,21 @@ class RuleEvaluator:
         if not self._temporal_allowed():
             return False
 
+        # Check for cross‑camera arming (lowered threshold)
+        effective_threshold = self.rule.confidence_threshold
+        if camera_id:
+            # Per‑rule armed threshold takes precedence
+            armed = await get_armed_threshold(camera_id, self.rule.rule_id)
+            if armed is not None:
+                effective_threshold = armed
+            else:
+                # Fall back to global camera‑level arming
+                global_armed = await get_global_armed_threshold(camera_id)
+                if global_armed is not None:
+                    effective_threshold = global_armed
+
         # ---- 2. Object confidence & top‑k margin filter ---------------
-        confident_objects = self._filter_confident_objects(det_event.objects)
+        confident_objects = self._filter_confident_objects(det_event.objects, effective_threshold)
         if not confident_objects:
             return False
 
@@ -133,26 +148,24 @@ class RuleEvaluator:
         return is_within_schedule(now, self.rule.schedule)
 
     def _filter_confident_objects(
-        self, objects: List[DetectionObject]
+        self, objects: List[DetectionObject], effective_threshold: Optional[float] = None
     ) -> List[DetectionObject]:
         """
         Apply confidence threshold AND top‑k margin to reduce false positives.
 
         For each object:
-          - primary (top‑1) confidence must be ≥ rule.confidence_threshold
+          - primary (top‑1) confidence must be ≥ effective threshold
           - if a top‑k list is present, the margin between top‑1 and the next class
             must be ≥ self.min_margin. If not, the object is discarded (ambiguous).
           - If no top‑k is provided, we fall back to simple threshold.
         """
+        thr = effective_threshold if effective_threshold is not None else self.rule.confidence_threshold
         filtered = []
         for obj in objects:
-            # basic threshold
-            if obj.confidence < self.rule.confidence_threshold:
+            if obj.confidence < thr:
                 continue
 
-            # System‑2 margin check if top_k predictions are available
             if hasattr(obj, "top_k") and obj.top_k:
-                # obj.top_k is expected to be List[Tuple[str, float]] sorted desc
                 if len(obj.top_k) >= 2:
                     first_conf = obj.top_k[0][1]
                     second_conf = obj.top_k[1][1]
@@ -161,8 +174,6 @@ class RuleEvaluator:
                             f"Object {obj.class_name} rejected: margin {first_conf-second_conf:.3f} < {self.min_margin}"
                         )
                         continue
-                # else only one class – accept
-
             filtered.append(obj)
         return filtered
 
@@ -171,19 +182,16 @@ class RuleEvaluator:
     ) -> List[Tuple[DetectionObject, str]]:
         """Return list of (object, zone_name) for objects whose feet are inside a zone."""
         if not self.rule.zones:
-            # no spatial constraint – all objects are "in" virtual zone "any"
             return [(obj, "any") for obj in objects]
 
         zoned = []
         for obj in objects:
-            # feet position: bottom‑center of bounding box (normalized 0‑1)
             feet_x = (obj.bbox[0] + obj.bbox[2]) / 2
-            feet_y = obj.bbox[3]          # ymax = bottom
+            feet_y = obj.bbox[3]
             for zone in self.rule.zones:
-                # zone.points is list of [x,y] normalized
                 if is_bottom_center_in_zone(feet_x, feet_y, zone.points):
                     zoned.append((obj, zone.name))
-                    break                # a person can stand in only one zone at a time
+                    break
         return zoned
 
     def _evaluate_condition(
@@ -192,8 +200,6 @@ class RuleEvaluator:
         confident_objects: List[DetectionObject],
         objects_in_zone: List[Tuple[DetectionObject, str]],
     ) -> bool:
-        """Evaluate the rule's condition string (prototype) using a safe context."""
-        # Build context from highest‑confidence object per required module
         ctx = {}
         for mod in self.rule.detection_modules:
             ctx[f"{mod}_present"] = False
@@ -201,19 +207,14 @@ class RuleEvaluator:
             ctx[f"{mod}_in_zone"] = False
 
         for obj, zone_name in objects_in_zone:
-            # match module – exact class name from rule (case‑insensitive)
             for mod in self.rule.detection_modules:
                 if obj.class_name.lower() == mod.lower():
                     ctx[f"{mod}_present"] = True
                     ctx[f"{mod}_confidence"] = max(ctx[f"{mod}_confidence"], obj.confidence)
-                    ctx[f"{mod}_in_zone"] = True   # if we matched it, it's in zone
+                    ctx[f"{mod}_in_zone"] = True
                     break
 
-        # For modules not detected but required, leave False/0
-        # Evaluate condition string using a sandboxed eval (only builtins clean)
-        # In production, replace with a custom parser (AST, pyparsing, etc.)
         condition = self.rule.condition
-        # Build safe globals with only basic comparison operators
         safe_globals = {
             "__builtins__": {},
             "True": True,
@@ -232,14 +233,11 @@ class RuleEvaluator:
     async def _handle_violation(
         self, det_event: DetectionEvent, camera_id: Optional[UUID]
     ):
-        """Persist a ViolationEvent row and trigger Celery escalation."""
-        # Choose camera_id – prefer argument, then event's camera_id
         cam_id = camera_id or getattr(det_event, "camera_id", None)
         if not cam_id:
             logger.warning("No camera_id for violation; skipping DB write and alert")
             return
 
-        # Write violation to DB asynchronously
         async with AsyncSessionLocal() as session:
             viol = ViolationEvent(
                 rule_id=self.rule.rule_id,
@@ -252,8 +250,6 @@ class RuleEvaluator:
             await session.refresh(viol)
             event_id = viol.event_id
 
-        # Send Celery tasks for Level‑1 escalation (immediate)
-        # The escalation state machine will handle higher levels
         if self.rule.escalation_levels:
             for channel in self.rule.escalation_levels[0].channels:
                 celery_app.send_task(
@@ -262,12 +258,17 @@ class RuleEvaluator:
                 )
             logger.info(f"Violation {event_id} dispatched to Celery (Level 1)")
 
-        # Optionally, also add to the global escalation state
         try:
             from engine.escalation import escalation_state
             await escalation_state.handle_violation_start(event_id, self.rule)
         except ImportError:
             pass
+
+        # Cross‑camera linking
+        try:
+            await process_cross_camera_links(self.rule, cam_id)
+        except Exception as e:
+            logger.error(f"Cross‑camera linking failed: {e}")
 
     # ------------------------------------------------------------------
     # DISK GUARD
@@ -282,7 +283,6 @@ class RuleEvaluator:
                 )
                 return False
         except FileNotFoundError:
-            # Path doesn't exist (not on Kaggle) – skip check
             pass
         return True
 
@@ -310,5 +310,4 @@ class RuleEvaluator:
             self._heartbeat_thread.join(timeout=2)
 
     def __del__(self):
-        """Clean up the heartbeat thread when the evaluator is garbage collected."""
         self.stop_heartbeat()
